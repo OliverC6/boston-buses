@@ -3,7 +3,36 @@ import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 
 // Data
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
+function resolveApiBaseUrl() {
+    const rawValue = import.meta.env.VITE_API_BASE_URL
+
+    if (typeof rawValue === 'string') {
+        const trimmed = rawValue.trim()
+
+        if (trimmed !== '') {
+            return trimmed.replace(/\/$/, '')
+        }
+    }
+
+    if (typeof window !== 'undefined' && window.location) {
+        const { protocol, hostname, port } = window.location
+        const cleanedProtocol = protocol && protocol.endsWith(':') ? protocol : `${protocol || 'https'}:`
+        const normalizedHost = hostname || 'localhost'
+        const localHosts = new Set(['localhost', '127.0.0.1', '::1', '[::1]', '0.0.0.0'])
+
+        if (localHosts.has(normalizedHost)) {
+            return `${cleanedProtocol}//${normalizedHost}:3000`
+        }
+
+        const portSegment = port ? `:${port}` : ''
+        return `${cleanedProtocol}//${normalizedHost}${portSegment}`.replace(/\/$/, '')
+    }
+
+    return 'http://localhost:3000'
+}
+
+const API_BASE_URL = resolveApiBaseUrl()
+console.log("🚀 ~ API_BASE_URL:", API_BASE_URL)
 const ROUTES_LAYER_ID = 3
 const EMPTY_GEOJSON = { type: 'FeatureCollection', features: [] }
 
@@ -240,12 +269,11 @@ export default function App() {
                     data: EMPTY_GEOJSON
                 })
 
-                mapRef.current?.addLayer({
+                const layerConfig = {
                     id: config.layerId,
                     type: 'circle',
                     source: config.sourceId,
                     minzoom: config.minzoom,
-                    maxzoom: config.maxzoom,
                     paint: {
                         'circle-radius': config.circleRadius,
                         'circle-color': '#1f7bf6',
@@ -253,7 +281,13 @@ export default function App() {
                         'circle-stroke-width': 0.6,
                         'circle-stroke-color': '#ffffff'
                     }
-                })
+                }
+
+                if (typeof config.maxzoom === 'number') {
+                    layerConfig.maxzoom = config.maxzoom
+                }
+
+                mapRef.current?.addLayer(layerConfig)
             })
 
             mapRef.current.on('mouseenter', 'bus-routes-line', () => {
