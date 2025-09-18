@@ -289,6 +289,9 @@ async function fetchMbtaShapesForRoutes(routeIds, shapesByRoute, routeMetadata) 
         return
     }
 
+    const url = new URL('https://api-v3.mbta.com/shapes')
+    url.searchParams.set('filter[route]', validRouteIds.join(','))
+
     const pageLimit = 500
     let pageOffset = 0
 
