@@ -6,34 +6,40 @@ import 'maplibre-gl/dist/maplibre-gl.css'
 const EMPTY_GEOJSON = { type: 'FeatureCollection', features: [] }
 
 // Layer Configs
-const STOP_LAYER_CONFIGS = [
-    {
-        arcgisLayerId: 2,
-        sourceId: 'bus-stops-overview-source',
-        layerId: 'bus-stops-overview-layer',
-        minzoom: 13.5,
-        maxzoom: 15.4,
-        circleRadius: 3.2,
-        circleOpacity: 0.55
-    },
-    {
-        arcgisLayerId: 1,
-        sourceId: 'bus-stops-community-source',
-        layerId: 'bus-stops-community-layer',
-        minzoom: 15.4,
-        maxzoom: 17.2,
-        circleRadius: 3.9,
-        circleOpacity: 0.65
-    },
-    {
-        arcgisLayerId: 0,
-        sourceId: 'bus-stops-detail-source',
-        layerId: 'bus-stops-detail-layer',
-        minzoom: 17.2,
-        circleRadius: 4.6,
-        circleOpacity: 0.75
+const STOP_LAYER = {
+    arcgisLayerId: 0,
+    sourceId: 'bus-stops-source',
+    layerId: 'bus-stops-layer',
+    minzoom: 13.5,
+    maxzoom: 24,
+    circle: {
+        radius: [
+            'interpolate',
+            ['linear'],
+            ['zoom'],
+            13.5,
+            3.2,
+            15.4,
+            3.9,
+            17.2,
+            4.6
+        ],
+        color: '#1f7bf6',
+        opacity: 0.7,
+        strokeWidth: 0.6,
+        strokeColor: '#ffffff'
     }
-]
+}
+
+// Stops Data
+/*
+function createEmptyStopData() {
+    return STOP_LAYER_CONFIGS.reduce((accumulator, config) => {
+        accumulator[config.sourceId] = EMPTY_GEOJSON
+        return accumulator
+    }, {})
+}
+*/
 
 // Colors
 const COLOR_PALETTE = [
@@ -94,6 +100,39 @@ function normalizeRouteFeature(feature, index) {
     }
 }
 
+function normalizeStopFeature(stop, index) {
+    if (!stop) return null
+
+    const attributes = stop.attributes ?? {}
+    const latitude = Number(attributes.latitude)
+    const longitude = Number(attributes.longitude)
+
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+        return null
+    }
+
+    const trimmedName = typeof attributes.name === 'string' ? attributes.name.trim() : ''
+    const fallbackName = trimmedName || 'MBTA Stop'
+
+    return {
+        type: 'Feature',
+        id: stop.id ?? `stop-${index}`,
+        geometry: {
+            type: 'Point',
+            coordinates: [longitude, latitude]
+        },
+        properties: {
+            name: fallbackName,
+            description: typeof attributes.description === 'string' ? attributes.description.trim() : '',
+            municipality: typeof attributes.municipality === 'string' ? attributes.municipality.trim() : '',
+            wheelchair_boarding: attributes.wheelchair_boarding,
+            platform_code: typeof attributes.platform_code === 'string' ? attributes.platform_code.trim() : '',
+            on_street: typeof attributes.on_street === 'string' ? attributes.on_street.trim() : '',
+            at_street: typeof attributes.at_street === 'string' ? attributes.at_street.trim() : ''
+        }
+    }
+}
+
 function getErrorMessage(error, fallbackMessage) {
     if (error instanceof Error) return error.message
     if (typeof error === 'string' && error.trim() !== '') return error
@@ -142,18 +181,72 @@ async function fetchRoutesFromGeoJson() {
     throw new Error(message)
 }
 
-/*
-async function fetchMassGisStops() {
-    const entries = await Promise.all(
-        STOP_LAYER_CONFIGS.map(async (config) => {
-            const data = await fetchLayerFeatures(config.arcgisLayerId)
-            return [config.sourceId, data]
-        })
-    )
+async function fetchMbtaStops() {
+    const stops = []
+    const url = new URL('https://api-v3.mbta.com/stops')
+    const pageLimit = 1000
+    let pageOffset = 0
 
-    return Object.fromEntries(entries)
+    while (true) {
+        url.searchParams.set('page[limit]', String(pageLimit))
+        url.searchParams.set('page[offset]', String(pageOffset))
+        url.searchParams.set('filter[route_type]', '3')
+        url.searchParams.set('sort', 'name')
+
+        const response = await fetch(url.toString(), {
+            cache: 'no-cache',
+            headers: {
+                accept: 'application/vnd.api+json'
+            }
+        })
+
+        if (!response.ok) {
+            const message = await response.text()
+            throw new Error(`request failed with status ${response.status}: ${message}`)
+        }
+
+        const payload = await response.json()
+
+        if (!payload || !Array.isArray(payload.data)) {
+            throw new Error('unexpected response format from MBTA stops API')
+        }
+
+        const pageFeatures = payload.data
+            .map((item, index) => normalizeStopFeature(item, pageOffset + index))
+            .filter(Boolean)
+
+        stops.push(...pageFeatures)
+
+        const hasNextPage = Boolean(payload.links?.next)
+
+        if (!hasNextPage || payload.data.length < pageLimit) {
+            break
+        }
+
+        pageOffset += pageLimit
+
+        if (pageOffset > 100000) {
+            throw new Error('pagination limit exceeded while loading MBTA stops')
+        }
+    }
+
+    if (!stops.length) {
+        throw new Error('no bus stops returned from the MBTA API')
+    }
+
+    const featureCollection = { type: 'FeatureCollection', features: stops }
+
+    return STOP_LAYER.reduce((accumulator, config) => {
+        accumulator[config.sourceId] = featureCollection
+        return accumulator
+    }, {})
+    /*
+    return STOP_LAYER_CONFIGS.reduce((accumulator, config) => {
+        accumulator[config.sourceId] = featureCollection
+        return accumulator
+    }, {})
+    */
 }
-*/
 
 // Component
 export default function App() {
@@ -167,7 +260,7 @@ export default function App() {
 
     // State
     const [routesData, setRoutesData] = useState(EMPTY_GEOJSON)
-    const [stopData, setStopData] = useState(null)
+    const [stopData, setStopData] = useState(EMPTY_GEOJSON)
     const [selectedRouteId, setSelectedRouteId] = useState(null)
     const [mapIsReady, setMapIsReady] = useState(false)
     const [isFetchingData, setIsFetchingData] = useState(false)
@@ -193,6 +286,15 @@ export default function App() {
             })),
         [routesData, selectedRouteId]
     )
+
+    const stopCount = useMemo(() => {
+        if (!stopData) return 0
+        const firstSourceId = STOP_LAYER[0]?.sourceId
+        if (!firstSourceId) return 0
+        const collection = stopData[firstSourceId]
+        if (!collection || !Array.isArray(collection.features)) return 0
+        return collection.features.length
+    }, [stopData])
 
     useEffect(() => {
         if (mapRef.current) return
@@ -261,7 +363,7 @@ export default function App() {
                 }
             })
 
-            STOP_LAYER_CONFIGS.forEach((config) => {
+            STOP_LAYER.forEach((config) => {
                 mapRef.current?.addSource(config.sourceId, {
                     type: 'geojson',
                     data: EMPTY_GEOJSON
@@ -276,7 +378,7 @@ export default function App() {
                         'circle-radius': config.circleRadius,
                         'circle-color': '#1f7bf6',
                         'circle-opacity': config.circleOpacity,
-                        'circle-stroke-width': 0.6,
+                        'circle-stroke-width': 0.9,
                         'circle-stroke-color': '#ffffff'
                     }
                 }
@@ -341,7 +443,7 @@ export default function App() {
                 popupRef.current
                     ?.setLngLat(event.lngLat)
                     .setHTML(
-                        `<strong>${routeId} ${name}</strong><p class="popup-hint">Shift + click anywhere on the map to append a waypoint for this route.</p>`
+                        `<strong>${routeId} ${name}</strong><p class="popup-hint">Shift + click anywhere on the map to append a stop for this route.</p>`
                     )
                     .addTo(mapRef.current)
             })
@@ -434,9 +536,9 @@ export default function App() {
             setStopDataError(null)
 
             try {
-                const [routesResult] = await Promise.allSettled([
+                const [routesResult, stopsResult] = await Promise.allSettled([
                     fetchRoutesFromGeoJson(),
-                    //fetchMassGisStops()
+                    fetchMbtaStops()
                 ])
 
                 if (cancelled) return
@@ -450,6 +552,17 @@ export default function App() {
                     )
                     setRoutesData(EMPTY_GEOJSON)
                     setDataError(message)
+                }
+
+                if (stopsResult.status === 'fulfilled') {
+                    setStopData(stopsResult.value)
+                } else {
+                    const message = getErrorMessage(
+                        stopsResult.reason,
+                        'Failed to load bus stops from the MBTA API.'
+                    )
+                    setStopData(EMPTY_GEOJSON)
+                    setStopDataError(message)
                 }
             } finally {
                 if (!cancelled) {
@@ -477,7 +590,7 @@ export default function App() {
     useEffect(() => {
         if (!mapRef.current || !mapReadyRef.current || !stopData) return
 
-        STOP_LAYER_CONFIGS.forEach((config) => {
+        STOP_LAYER.forEach((config) => {
             const source = mapRef.current?.getSource(config.sourceId)
             const data = stopData[config.sourceId]
 
@@ -557,11 +670,14 @@ export default function App() {
                     </p>
                     {stopDataError ? (
                         <p className="legend-warning">{stopDataError}</p>
-                    ) : (
+                    ) : isFetchingData && stopCount === 0 ? (
+                        <p className="legend-note">Loading MBTA bus stop locations from the live API…</p>
+                    ) : stopCount > 0 ? (
                         <p className="legend-note">
-                            MassGIS bus stop overlays continue to load from the live service whenever it is
-                            reachable.
+                            Loaded {stopCount.toLocaleString()} MBTA bus stops from the live API.
                         </p>
+                    ) : (
+                        <p className="legend-note">MBTA bus stop locations load directly from the live API.</p>
                     )}
                 </div>
             </div>
