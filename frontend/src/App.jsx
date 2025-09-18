@@ -1025,14 +1025,10 @@ export default function App() {
                             )
                         })}
                     </div>
-                    <p className="legend-note">
-                        Routes are sourced from the bundled <code>routes.geojson</code> file. Shift-click the map to
-                        append test stops for the selected route.
-                    </p>
                     {stopDataError ? (
                         <p className="legend-warning">{stopDataError}</p>
                     ) : isFetchingData && stopCount === 0 ? (
-                        <p className="legend-note">Loading MBTA bus stop locations from the live API…</p>
+                        <p className="legend-note">Loading bus stops from the MBTA API…</p>
                     ) : stopCount > 0 ? (
                         <p className="legend-note">
                             Loaded {stopCount.toLocaleString()} MBTA bus stops from the live API.
