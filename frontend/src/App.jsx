@@ -3,73 +3,7 @@ import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 
 // Data
-/*
-function resolveApiBaseUrl() {
-    const rawValue = import.meta.env.VITE_API_BASE_URL
-
-    if (typeof rawValue === 'string') {
-        const trimmed = rawValue.trim()
-
-        if (trimmed !== '') {
-            return trimmed.replace(/\/$/, '')
-        }
-    }
-
-    if (typeof window !== 'undefined' && window.location) {
-        const { protocol, hostname, port } = window.location
-        const cleanedProtocol = protocol && protocol.endsWith(':') ? protocol : `${protocol || 'https'}:`
-        const normalizedHost = hostname || 'localhost'
-        const localHosts = new Set(['localhost', '127.0.0.1', '::1', '[::1]', '0.0.0.0'])
-
-        if (localHosts.has(normalizedHost)) {
-            return `${cleanedProtocol}//${normalizedHost}:3000`
-        }
-
-        const portSegment = port ? `:${port}` : ''
-        return `${cleanedProtocol}//${normalizedHost}${portSegment}`.replace(/\/$/, '')
-    }
-
-    return 'http://localhost:3000'
-}
-
-const API_BASE_URL = resolveApiBaseUrl()
-*/
 const EMPTY_GEOJSON = { type: 'FeatureCollection', features: [] }
-const APP_BASE_PATH = typeof import.meta?.env?.BASE_URL === 'string' ? import.meta.env.BASE_URL : '/'
-
-function normalizeBasePath(basePath) {
-    if (typeof basePath !== 'string') return ''
-
-    const trimmed = basePath.trim()
-
-    if (trimmed === '' || trimmed === '/') {
-        return ''
-    }
-
-    return trimmed.endsWith('/') ? trimmed.slice(0, -1) : trimmed
-}
-
-const NORMALIZED_BASE_PATH = normalizeBasePath(APP_BASE_PATH)
-
-function withBasePath(path) {
-    const normalizedPath = path.startsWith('/') ? path : `/${path}`
-
-    if (!NORMALIZED_BASE_PATH) {
-        return normalizedPath
-    }
-
-    return `${NORMALIZED_BASE_PATH}${normalizedPath}`
-}
-
-const ROUTES_GEOJSON_CANDIDATE_PATHS = Array.from(
-    new Set([
-        withBasePath('/data/routes.geojson'),
-        withBasePath('/routes.geojson'),
-        '/data/routes.geojson',
-        '/routes.geojson',
-        'data/routes.geojson'
-    ])
-)
 
 // Layer Configs
 const STOP_LAYER_CONFIGS = [
@@ -131,21 +65,6 @@ function getRouteColor(routeId) {
     return COLOR_PALETTE[paletteIndex]
 }
 
-/*
-function formatDirectionLabel(value) {
-    if (typeof value !== 'string') return ''
-
-    const trimmed = value.trim()
-
-    if (!trimmed) return ''
-
-    return trimmed
-        .split(/\s+/)
-        .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
-        .join(' ')
-}
-*/
-
 function normalizeRouteFeature(feature, index) {
     if (!feature || !feature.geometry) return null
 
@@ -181,39 +100,38 @@ function getErrorMessage(error, fallbackMessage) {
     return fallbackMessage
 }
 
+// Async Functions
 async function fetchRoutesFromGeoJson() {
     let lastError = null
 
-    for (const path of ROUTES_GEOJSON_CANDIDATE_PATHS) {
-        try {
-            const response = await fetch(path, { cache: 'no-cache' })
+    try {
+        const response = await fetch('/data/routes.geojson', { cache: 'no-cache' })
 
-            if (!response.ok) {
-                const message = await response.text()
-                throw new Error(`request failed with status ${response.status}: ${message}`)
-            }
-
-            const featureCollection = await response.json()
-
-            if (!featureCollection || !Array.isArray(featureCollection.features)) {
-                throw new Error('missing features array in GeoJSON file')
-            }
-
-            const features = featureCollection.features
-                .map((feature, index) => normalizeRouteFeature(feature, index))
-                .filter(Boolean)
-
-            if (!features.length) {
-                throw new Error('no usable bus routes found in GeoJSON file')
-            }
-
-            return { type: 'FeatureCollection', features }
-        } catch (error) {
-            lastError =
-                error instanceof Error
-                    ? error
-                    : new Error('Unexpected error while loading routes GeoJSON')
+        if (!response.ok) {
+            const message = await response.text()
+            throw new Error(`request failed with status ${response.status}: ${message}`)
         }
+
+        const featureCollection = await response.json()
+
+        if (!featureCollection || !Array.isArray(featureCollection.features)) {
+            throw new Error('missing features array in GeoJSON file')
+        }
+
+        const features = featureCollection.features
+            .map((feature, index) => normalizeRouteFeature(feature, index))
+            .filter(Boolean)
+
+        if (!features.length) {
+            throw new Error('no usable bus routes found in GeoJSON file')
+        }
+
+        return { type: 'FeatureCollection', features }
+    } catch (error) {
+        lastError =
+            error instanceof Error
+                ? error
+                : new Error('Unexpected error while loading routes GeoJSON')
     }
 
     const message =
@@ -595,10 +513,10 @@ export default function App() {
         <div className="map-wrap">
             <div className="info-panel">
                 <div className="header">
-                    <strong>MBTA Bus Scenario Mapper</strong>
+                    <strong>MBTA Bus Frequency Mapper</strong>
                     <p>
-                        Explore existing routes, then select one and <kbd>Shift</kbd> + click anywhere on the map to
-                        sketch new waypoints for rapid scenario testing.
+                        Explore existing routes, then select one and <kbd>Shift</kbd> + click anywhere on the route to
+                        sketch new stops for rapid frequency testing.
                     </p>
                 </div>
                 <div className="legend">
