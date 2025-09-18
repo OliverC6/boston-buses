@@ -105,7 +105,7 @@ async function fetchRoutesFromGeoJson() {
     let lastError = null
 
     try {
-        const response = await fetch('/data/routes.geojson', { cache: 'no-cache' })
+        const response = await fetch('data/routes.geojson', { cache: 'no-cache' })
 
         if (!response.ok) {
             const message = await response.text()
