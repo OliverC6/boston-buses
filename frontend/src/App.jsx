@@ -293,7 +293,7 @@ async function fetchMbtaShapesForRoutes(routeIds, shapesByRoute, routeMetadata) 
     let pageOffset = 0
 
     while (true) {
-        url.searchParams.set('filter[type]', '3')
+        url.searchParams.set('filter[route_type]', '3')
         url.searchParams.set('page[limit]', String(pageLimit))
         url.searchParams.set('page[offset]', String(pageOffset))
         url.searchParams.set('include', 'route')
