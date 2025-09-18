@@ -31,16 +31,6 @@ const STOP_LAYER = {
     }
 }
 
-// Stops Data
-/*
-function createEmptyStopData() {
-    return STOP_LAYER_CONFIGS.reduce((accumulator, config) => {
-        accumulator[config.sourceId] = EMPTY_GEOJSON
-        return accumulator
-    }, {})
-}
-*/
-
 // Colors
 const COLOR_PALETTE = [
     '#e74c3c',
@@ -236,21 +226,22 @@ async function fetchMbtaStops() {
 
     const featureCollection = { type: 'FeatureCollection', features: stops }
 
-    return STOP_LAYER.reduce((accumulator, config) => {
-        accumulator[config.sourceId] = featureCollection
-        return accumulator
-    }, {})
-    /*
-    return STOP_LAYER_CONFIGS.reduce((accumulator, config) => {
-        accumulator[config.sourceId] = featureCollection
-        return accumulator
-    }, {})
-    */
+    if (!STOP_LAYER || typeof STOP_LAYER !== 'object') {
+        throw new Error('Invalid stop layer configuration')
+    }
+
+    const { sourceId } = STOP_LAYER
+
+    if (!sourceId) {
+        throw new Error('Stop layer is missing a source ID')
+    }
+
+    return { [sourceId]: featureCollection }
 }
 
 // Component
 export default function App() {
-    // Ref
+    // Refs
     const mapContainer = useRef(null)
     const mapRef = useRef(null)
     const popupRef = useRef(null)
@@ -258,16 +249,16 @@ export default function App() {
     const mapReadyRef = useRef(false)
     const selectedRouteIdRef = useRef(null)
 
-    // State
+    // States
     const [routesData, setRoutesData] = useState(EMPTY_GEOJSON)
-    const [stopData, setStopData] = useState(EMPTY_GEOJSON)
+    const [stopData, setStopData] = useState({})
     const [selectedRouteId, setSelectedRouteId] = useState(null)
     const [mapIsReady, setMapIsReady] = useState(false)
     const [isFetchingData, setIsFetchingData] = useState(false)
     const [dataError, setDataError] = useState(null)
     const [stopDataError, setStopDataError] = useState(null)
 
-    // Memo
+    // Memos
     const legendItems = useMemo(
         () =>
             routesData.features
@@ -289,13 +280,14 @@ export default function App() {
 
     const stopCount = useMemo(() => {
         if (!stopData) return 0
-        const firstSourceId = STOP_LAYER[0]?.sourceId
-        if (!firstSourceId) return 0
-        const collection = stopData[firstSourceId]
+        const sourceId = STOP_LAYER?.sourceId
+        if (!sourceId) return 0
+        const collection = stopData[sourceId]
         if (!collection || !Array.isArray(collection.features)) return 0
         return collection.features.length
     }, [stopData])
 
+    // Effects
     useEffect(() => {
         if (mapRef.current) return
 
@@ -363,32 +355,41 @@ export default function App() {
                 }
             })
 
-            STOP_LAYER.forEach((config) => {
-                mapRef.current?.addSource(config.sourceId, {
-                    type: 'geojson',
-                    data: EMPTY_GEOJSON
-                })
+            if (STOP_LAYER && typeof STOP_LAYER === 'object') {
+                const { sourceId, layerId } = STOP_LAYER
 
-                const layerConfig = {
-                    id: config.layerId,
-                    type: 'circle',
-                    source: config.sourceId,
-                    minzoom: config.minzoom,
-                    paint: {
-                        'circle-radius': config.circleRadius,
-                        'circle-color': '#1f7bf6',
-                        'circle-opacity': config.circleOpacity,
-                        'circle-stroke-width': 0.9,
-                        'circle-stroke-color': '#ffffff'
+                if (sourceId && layerId) {
+                    const circleOptions = STOP_LAYER.circle ?? {}
+
+                    mapRef.current?.addSource(sourceId, {
+                        type: 'geojson',
+                        data: EMPTY_GEOJSON
+                    })
+
+                    const layerConfig = {
+                        id: layerId,
+                        type: 'circle',
+                        source: sourceId,
+                        paint: {
+                            'circle-radius': circleOptions.radius ?? 4,
+                            'circle-color': circleOptions.color ?? '#1f7bf6',
+                            'circle-opacity': circleOptions.opacity ?? 0.7,
+                            'circle-stroke-width': circleOptions.strokeWidth ?? 0.9,
+                            'circle-stroke-color': circleOptions.strokeColor ?? '#ffffff'
+                        }
                     }
-                }
 
-                if (typeof config.maxzoom === 'number') {
-                    layerConfig.maxzoom = config.maxzoom
-                }
+                    if (typeof STOP_LAYER.minzoom === 'number') {
+                        layerConfig.minzoom = STOP_LAYER.minzoom
+                    }
 
-                mapRef.current?.addLayer(layerConfig)
-            })
+                    if (typeof STOP_LAYER.maxzoom === 'number') {
+                        layerConfig.maxzoom = STOP_LAYER.maxzoom
+                    }
+
+                    mapRef.current?.addLayer(layerConfig)
+                }
+            }
 
             mapRef.current.on('mouseenter', 'bus-routes-line', () => {
                 mapRef.current.getCanvas().style.cursor = 'pointer'
@@ -561,7 +562,7 @@ export default function App() {
                         stopsResult.reason,
                         'Failed to load bus stops from the MBTA API.'
                     )
-                    setStopData(EMPTY_GEOJSON)
+                    setStopData({})
                     setStopDataError(message)
                 }
             } finally {
@@ -590,14 +591,15 @@ export default function App() {
     useEffect(() => {
         if (!mapRef.current || !mapReadyRef.current || !stopData) return
 
-        STOP_LAYER.forEach((config) => {
-            const source = mapRef.current?.getSource(config.sourceId)
-            const data = stopData[config.sourceId]
+        const sourceId = STOP_LAYER?.sourceId
+        if (!sourceId) return
 
-            if (source && data) {
-                source.setData(data)
-            }
-        })
+        const source = mapRef.current?.getSource(sourceId)
+        const data = stopData[sourceId]
+
+        if (source && data) {
+            source.setData(data)
+        }
     }, [stopData])
 
     useEffect(() => {
@@ -666,7 +668,7 @@ export default function App() {
                     </div>
                     <p className="legend-note">
                         Routes are sourced from the bundled <code>routes.geojson</code> file. Shift-click the map to
-                        append test waypoints for the selected route.
+                        append test stops for the selected route.
                     </p>
                     {stopDataError ? (
                         <p className="legend-warning">{stopDataError}</p>
