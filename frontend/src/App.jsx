@@ -65,8 +65,24 @@ function normalizeRouteFeature(feature, index) {
     if (!feature || !feature.geometry) return null
 
     const properties = feature.properties ?? {}
-    const routeNumber = properties.route_num != null ? String(properties.route_num).trim() : ''
-    const routeName = properties.route_desc != null ? String(properties.route_desc).trim() : ''
+
+    const routeNumberSource =
+        properties.route_num !== undefined && properties.route_num !== null
+            ? properties.route_num
+            : properties.route_id
+    const routeNameSource =
+        properties.route_desc !== undefined && properties.route_desc !== null
+            ? properties.route_desc
+            : properties.name
+
+    const routeNumber =
+        routeNumberSource !== undefined && routeNumberSource !== null
+            ? String(routeNumberSource).trim()
+            : ''
+    const routeName =
+        routeNameSource !== undefined && routeNameSource !== null
+            ? String(routeNameSource).trim()
+            : ''
 
     const fallbackIdParts = []
     if (routeNumber) {
@@ -129,46 +145,291 @@ function getErrorMessage(error, fallbackMessage) {
     return fallbackMessage
 }
 
-// Async Functions
-async function fetchRoutesFromGeoJson() {
-    let lastError = null
+function decodePolyline(encoded) {
+    if (typeof encoded !== 'string' || encoded.length === 0) {
+        return []
+    }
 
-    try {
-        const response = await fetch('/routes.geojson', { cache: 'no-cache' })
+    const coordinates = []
+    let index = 0
+    let latitude = 0
+    let longitude = 0
+
+    while (index < encoded.length) {
+        let result = 0
+        let shift = 0
+        let byte
+
+        do {
+            if (index >= encoded.length) {
+                return coordinates
+            }
+
+            byte = encoded.charCodeAt(index++) - 63
+            result |= (byte & 0x1f) << shift
+            shift += 5
+        } while (byte >= 0x20)
+
+        const deltaLat = (result & 1) !== 0 ? ~(result >> 1) : result >> 1
+        latitude += deltaLat
+
+        result = 0
+        shift = 0
+
+        do {
+            if (index >= encoded.length) {
+                return coordinates
+            }
+
+            byte = encoded.charCodeAt(index++) - 63
+            result |= (byte & 0x1f) << shift
+            shift += 5
+        } while (byte >= 0x20)
+
+        const deltaLng = (result & 1) !== 0 ? ~(result >> 1) : result >> 1
+        longitude += deltaLng
+
+        const lat = latitude / 1e5
+        const lng = longitude / 1e5
+
+        if (Number.isFinite(lat) && Number.isFinite(lng)) {
+            coordinates.push([lng, lat])
+        }
+    }
+
+    return coordinates
+}
+
+// Async Functions
+async function fetchMbtaRouteMetadata() {
+    const routes = new Map()
+    const url = new URL('https://api-v3.mbta.com/routes')
+    const pageLimit = 200
+    let pageOffset = 0
+
+    while (true) {
+        url.searchParams.set('filter[route_type]', '3')
+        url.searchParams.set('page[limit]', String(pageLimit))
+        url.searchParams.set('page[offset]', String(pageOffset))
+        url.searchParams.set('sort', 'short_name')
+
+        const response = await fetch(url.toString(), {
+            cache: 'no-cache',
+            headers: { accept: 'application/vnd.api+json' }
+        })
 
         if (!response.ok) {
             const message = await response.text()
             throw new Error(`request failed with status ${response.status}: ${message}`)
         }
 
-        const featureCollection = await response.json()
+        const payload = await response.json()
 
-        if (!featureCollection || !Array.isArray(featureCollection.features)) {
-            throw new Error('missing features array in GeoJSON file')
+        if (!payload || !Array.isArray(payload.data)) {
+            throw new Error('unexpected response format from MBTA routes API')
         }
 
-        const features = featureCollection.features
-            .map((feature, index) => normalizeRouteFeature(feature, index))
-            .filter(Boolean)
+        for (const item of payload.data) {
+            if (!item || typeof item !== 'object') continue
 
-        if (!features.length) {
-            throw new Error('no usable bus routes found in GeoJSON file')
+            const routeId = item.id
+            if (!routeId) continue
+
+            const attributes = item.attributes ?? {}
+            const shortName =
+                typeof attributes.short_name === 'string' ? attributes.short_name.trim() : ''
+            const longName =
+                typeof attributes.long_name === 'string' ? attributes.long_name.trim() : ''
+            const description =
+                typeof attributes.description === 'string' ? attributes.description.trim() : ''
+
+            routes.set(routeId, {
+                id: routeId,
+                shortName,
+                longName,
+                description
+            })
         }
 
-        return { type: 'FeatureCollection', features }
-    } catch (error) {
-        lastError =
-            error instanceof Error
-                ? error
-                : new Error('Unexpected error while loading routes GeoJSON')
+        const hasNextPage = Boolean(payload.links?.next)
+
+        if (!hasNextPage || payload.data.length < pageLimit) {
+            break
+        }
+
+        pageOffset += pageLimit
+
+        if (pageOffset > 10000) {
+            throw new Error('pagination limit exceeded while loading MBTA routes')
+        }
     }
 
-    const message =
-        lastError?.message
-            ? `Unable to load routes from local GeoJSON: ${lastError.message}`
-            : 'Unable to load routes from local GeoJSON file.'
+    return routes
+}
 
-    throw new Error(message)
+async function fetchMbtaRoutes() {
+    const routeMetadata = await fetchMbtaRouteMetadata()
+    const shapesByRoute = new Map()
+    const url = new URL('https://api-v3.mbta.com/shapes')
+    const pageLimit = 500
+    let pageOffset = 0
+
+    while (true) {
+        url.searchParams.set('filter[route_type]', '3')
+        url.searchParams.set('page[limit]', String(pageLimit))
+        url.searchParams.set('page[offset]', String(pageOffset))
+        url.searchParams.set('include', 'route')
+
+        const response = await fetch(url.toString(), {
+            cache: 'no-cache',
+            headers: { accept: 'application/vnd.api+json' }
+        })
+
+        if (!response.ok) {
+            const message = await response.text()
+            throw new Error(`request failed with status ${response.status}: ${message}`)
+        }
+
+        const payload = await response.json()
+
+        if (!payload || !Array.isArray(payload.data)) {
+            throw new Error('unexpected response format from MBTA shapes API')
+        }
+
+        for (const item of payload.data) {
+            if (!item || typeof item !== 'object') continue
+
+            const routeId = item.relationships?.route?.data?.id
+            if (!routeId) continue
+
+            const attributes = item.attributes ?? {}
+            const polyline = typeof attributes.polyline === 'string' ? attributes.polyline : ''
+            if (!polyline) continue
+
+            const coordinates = decodePolyline(polyline)
+            if (coordinates.length < 2) continue
+
+            const existing = shapesByRoute.get(routeId)
+
+            if (existing) {
+                existing.push(coordinates)
+            } else {
+                shapesByRoute.set(routeId, [coordinates])
+            }
+        }
+
+        if (Array.isArray(payload.included)) {
+            for (const includedItem of payload.included) {
+                if (!includedItem || includedItem.type !== 'route') continue
+
+                const routeId = includedItem.id
+                if (!routeId || routeMetadata.has(routeId)) continue
+
+                const attributes = includedItem.attributes ?? {}
+                const shortName =
+                    typeof attributes.short_name === 'string' ? attributes.short_name.trim() : ''
+                const longName =
+                    typeof attributes.long_name === 'string' ? attributes.long_name.trim() : ''
+                const description =
+                    typeof attributes.description === 'string' ? attributes.description.trim() : ''
+
+                routeMetadata.set(routeId, {
+                    id: routeId,
+                    shortName,
+                    longName,
+                    description
+                })
+            }
+        }
+
+        const hasNextPage = Boolean(payload.links?.next)
+
+        if (!hasNextPage || payload.data.length < pageLimit) {
+            break
+        }
+
+        pageOffset += pageLimit
+
+        if (pageOffset > 100000) {
+            throw new Error('pagination limit exceeded while loading MBTA shapes')
+        }
+    }
+
+    if (!shapesByRoute.size) {
+        throw new Error('no bus route shapes returned from the MBTA API')
+    }
+
+    const features = []
+    let index = 0
+
+    for (const [routeId, segments] of shapesByRoute.entries()) {
+        const cleanedSegments = segments
+            .map((segment) => {
+                if (!Array.isArray(segment)) return []
+
+                const cleaned = []
+
+                for (const coordinate of segment) {
+                    if (!Array.isArray(coordinate) || coordinate.length !== 2) continue
+
+                    const [lng, lat] = coordinate
+
+                    if (!Number.isFinite(lng) || !Number.isFinite(lat)) continue
+
+                    if (cleaned.length) {
+                        const [prevLng, prevLat] = cleaned[cleaned.length - 1]
+
+                        if (prevLng === lng && prevLat === lat) {
+                            continue
+                        }
+                    }
+
+                    cleaned.push([lng, lat])
+                }
+
+                return cleaned
+            })
+            .filter((segment) => segment.length >= 2)
+
+        if (!cleanedSegments.length) continue
+
+        const geometry =
+            cleanedSegments.length === 1
+                ? { type: 'LineString', coordinates: cleanedSegments[0] }
+                : { type: 'MultiLineString', coordinates: cleanedSegments }
+
+        const metadata = routeMetadata.get(routeId) ?? {}
+        const routeNumber = metadata.shortName || routeId
+        const routeName =
+            metadata.longName ||
+            metadata.description ||
+            (routeNumber && routeNumber !== routeId ? `Route ${routeNumber}` : `Route ${routeId}`)
+
+        const normalized = normalizeRouteFeature(
+            {
+                type: 'Feature',
+                id: routeId,
+                geometry,
+                properties: {
+                    route_num: routeNumber,
+                    route_desc: routeName,
+                    mbta_route_id: routeId
+                }
+            },
+            index
+        )
+
+        if (normalized) {
+            features.push(normalized)
+            index += 1
+        }
+    }
+
+    if (!features.length) {
+        throw new Error('no usable bus routes returned from the MBTA API')
+    }
+
+    return { type: 'FeatureCollection', features }
 }
 
 async function fetchMbtaStops() {
@@ -538,7 +799,7 @@ export default function App() {
 
             try {
                 const [routesResult, stopsResult] = await Promise.allSettled([
-                    fetchRoutesFromGeoJson(),
+                    fetchMbtaRoutes(),
                     fetchMbtaStops()
                 ])
 
@@ -549,7 +810,7 @@ export default function App() {
                 } else {
                     const message = getErrorMessage(
                         routesResult.reason,
-                        'Failed to load routes from the local GeoJSON file.'
+                        'Failed to load routes from the MBTA API.'
                     )
                     setRoutesData(EMPTY_GEOJSON)
                     setDataError(message)
@@ -639,7 +900,7 @@ export default function App() {
                     {dataError ? (
                         <p className="legend-error">{dataError}</p>
                     ) : isFetchingData && !legendItems.length ? (
-                        <p className="legend-note">Loading bus routes from the local GeoJSON file…</p>
+                        <p className="legend-note">Loading bus routes from the MBTA API…</p>
                     ) : null}
                     <div className="legend-items">
                         {legendItems.map((item) => {
