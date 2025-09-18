@@ -2,6 +2,15 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 
+const MBTA_API_KEY =
+    typeof import.meta.env.VITE_MBTA_API_KEY === 'string'
+        ? import.meta.env.VITE_MBTA_API_KEY.trim()
+        : ''
+
+const MBTA_REQUEST_HEADERS = MBTA_API_KEY
+    ? { accept: 'application/vnd.api+json', 'x-api-key': MBTA_API_KEY }
+    : { accept: 'application/vnd.api+json' }
+
 // Data
 const EMPTY_GEOJSON = { type: 'FeatureCollection', features: [] }
 
@@ -208,14 +217,14 @@ async function fetchMbtaRouteMetadata() {
     let pageOffset = 0
 
     while (true) {
-        url.searchParams.set('filter[route_type]', '3')
+        url.searchParams.set('filter[type]', '3')
         url.searchParams.set('page[limit]', String(pageLimit))
         url.searchParams.set('page[offset]', String(pageOffset))
         url.searchParams.set('sort', 'short_name')
 
         const response = await fetch(url.toString(), {
             cache: 'no-cache',
-            headers: { accept: 'application/vnd.api+json' }
+            headers: MBTA_REQUEST_HEADERS
         })
 
         if (!response.ok) {
@@ -267,22 +276,31 @@ async function fetchMbtaRouteMetadata() {
     return routes
 }
 
-async function fetchMbtaRoutes() {
-    const routeMetadata = await fetchMbtaRouteMetadata()
-    const shapesByRoute = new Map()
-    const url = new URL('https://api-v3.mbta.com/shapes')
+async function fetchMbtaShapesForRoutes(routeIds, shapesByRoute, routeMetadata) {
+    if (!Array.isArray(routeIds) || !routeIds.length) {
+        return
+    }
+
+    const validRouteIds = routeIds
+        .map((routeId) => (typeof routeId === 'string' ? routeId.trim() : ''))
+        .filter(Boolean)
+
+    if (!validRouteIds.length) {
+        return
+    }
+
     const pageLimit = 500
     let pageOffset = 0
 
     while (true) {
-        url.searchParams.set('filter[route_type]', '3')
+        url.searchParams.set('filter[type]', '3')
         url.searchParams.set('page[limit]', String(pageLimit))
         url.searchParams.set('page[offset]', String(pageOffset))
         url.searchParams.set('include', 'route')
 
         const response = await fetch(url.toString(), {
             cache: 'no-cache',
-            headers: { accept: 'application/vnd.api+json' }
+            headers: MBTA_REQUEST_HEADERS
         })
 
         if (!response.ok) {
@@ -353,6 +371,23 @@ async function fetchMbtaRoutes() {
         if (pageOffset > 100000) {
             throw new Error('pagination limit exceeded while loading MBTA shapes')
         }
+    }
+}
+
+async function fetchMbtaRoutes() {
+    const routeMetadata = await fetchMbtaRouteMetadata()
+    const routeIds = Array.from(routeMetadata.keys())
+
+    if (!routeIds.length) {
+        throw new Error('no bus routes returned from the MBTA API')
+    }
+
+    const shapesByRoute = new Map()
+    const batchSize = 25
+
+    for (let index = 0; index < routeIds.length; index += batchSize) {
+        const batch = routeIds.slice(index, index + batchSize)
+        await fetchMbtaShapesForRoutes(batch, shapesByRoute, routeMetadata)
     }
 
     if (!shapesByRoute.size) {
@@ -446,9 +481,7 @@ async function fetchMbtaStops() {
 
         const response = await fetch(url.toString(), {
             cache: 'no-cache',
-            headers: {
-                accept: 'application/vnd.api+json'
-            }
+            headers: MBTA_REQUEST_HEADERS
         })
 
         if (!response.ok) {
