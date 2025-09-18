@@ -296,7 +296,7 @@ async function fetchMbtaShapesForRoutes(routeIds, shapesByRoute, routeMetadata) 
     let pageOffset = 0
 
     while (true) {
-        url.searchParams.set('filter[route_type]', '3')
+        //url.searchParams.set('filter[type]', '3')
         url.searchParams.set('page[limit]', String(pageLimit))
         url.searchParams.set('page[offset]', String(pageOffset))
         url.searchParams.set('include', 'route')
@@ -320,7 +320,28 @@ async function fetchMbtaShapesForRoutes(routeIds, shapesByRoute, routeMetadata) 
         for (const item of payload.data) {
             if (!item || typeof item !== 'object') continue
 
-            const routeId = item.relationships?.route?.data?.id
+            //const routeId = item.relationships?.route?.data?.id
+            let routeId = ''
+
+            const routeRelationship = item.relationships?.route?.data
+
+            if (routeRelationship && typeof routeRelationship === 'object') {
+                routeId = typeof routeRelationship.id === 'string' ? routeRelationship.id : ''
+            } else if (Array.isArray(routeRelationship)) {
+                for (const rel of routeRelationship) {
+                    if (rel && typeof rel === 'object' && typeof rel.id === 'string') {
+                        routeId = rel.id
+                        break
+                    }
+                }
+            }
+
+            if (!routeId) {
+                const attributesRouteId = item.attributes?.route_id
+                if (typeof attributesRouteId === 'string') {
+                    routeId = attributesRouteId.trim()
+                }
+            }
             if (!routeId) continue
 
             const attributes = item.attributes ?? {}
