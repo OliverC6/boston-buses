@@ -70,6 +70,64 @@ function getRouteColor(routeId) {
     return COLOR_PALETTE[paletteIndex]
 }
 
+function extractRouteId(candidate) {
+    if (candidate === null || candidate === undefined) {
+        return ''
+    }
+
+    if (typeof candidate === 'string') {
+        return candidate.trim()
+    }
+
+    if (typeof candidate === 'number' || typeof candidate === 'bigint') {
+        return String(candidate).trim()
+    }
+
+    if (typeof candidate === 'object') {
+        const rawId = candidate.id ?? candidate.route_id ?? candidate.routeId
+
+        if (rawId !== undefined && rawId !== null) {
+            return String(rawId).trim()
+        }
+    }
+
+    return ''
+}
+
+function getRouteIdFromShape(shape) {
+    if (!shape || typeof shape !== 'object') {
+        return ''
+    }
+
+    const relationship = shape.relationships?.route?.data
+    console.log("🚀 ~ getRouteIdFromShape ~ relationship:", relationship)
+
+    if (Array.isArray(relationship)) {
+        for (const item of relationship) {
+            const extracted = extractRouteId(item)
+            if (extracted) {
+                return extracted
+            }
+        }
+    } else {
+        const extracted = extractRouteId(relationship)
+        if (extracted) {
+            return extracted
+        }
+    }
+
+    const attributesRouteId = shape.attributes?.route_id ?? shape.attributes?.routeId
+
+    if (attributesRouteId !== undefined && attributesRouteId !== null) {
+        const extracted = extractRouteId(attributesRouteId)
+        if (extracted) {
+            return extracted
+        }
+    }
+
+    return ''
+}
+
 function normalizeRouteFeature(feature, index) {
     if (!feature || !feature.geometry) return null
 
@@ -318,30 +376,11 @@ async function fetchMbtaShapesForRoutes(routeIds, shapesByRoute, routeMetadata) 
         }
 
         for (const item of payload.data) {
+            console.log("🚀 ~ fetchMbtaShapesForRoutes ~ item:", item)
             if (!item || typeof item !== 'object') continue
 
-            //const routeId = item.relationships?.route?.data?.id
-            let routeId = ''
-
-            const routeRelationship = item.relationships?.route?.data
-
-            if (routeRelationship && typeof routeRelationship === 'object') {
-                routeId = typeof routeRelationship.id === 'string' ? routeRelationship.id : ''
-            } else if (Array.isArray(routeRelationship)) {
-                for (const rel of routeRelationship) {
-                    if (rel && typeof rel === 'object' && typeof rel.id === 'string') {
-                        routeId = rel.id
-                        break
-                    }
-                }
-            }
-
-            if (!routeId) {
-                const attributesRouteId = item.attributes?.route_id
-                if (typeof attributesRouteId === 'string') {
-                    routeId = attributesRouteId.trim()
-                }
-            }
+            const routeId = getRouteIdFromShape(item)
+            console.log("🚀 ~ fetchMbtaShapesForRoutes ~ routeId:", routeId)
             if (!routeId) continue
 
             const attributes = item.attributes ?? {}
