@@ -11,7 +11,7 @@ export default function App() {
 
         mapRef.current = new maplibregl.Map({
             container: mapContainer.current,
-            style: 'https://demotiles.maplibre.org/style.json',
+            style: 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json',
             center: [-71.0589, 42.3601], // Boston (lng, lat)
             zoom: 12
         })
