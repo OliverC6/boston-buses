@@ -3,6 +3,7 @@ import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 
 // Data
+/*
 function resolveApiBaseUrl() {
     const rawValue = import.meta.env.VITE_API_BASE_URL
 
@@ -32,8 +33,8 @@ function resolveApiBaseUrl() {
 }
 
 const API_BASE_URL = resolveApiBaseUrl()
+*/
 const EMPTY_GEOJSON = { type: 'FeatureCollection', features: [] }
-
 const APP_BASE_PATH = typeof import.meta?.env?.BASE_URL === 'string' ? import.meta.env.BASE_URL : '/'
 
 function normalizeBasePath(basePath) {
@@ -130,6 +131,7 @@ function getRouteColor(routeId) {
     return COLOR_PALETTE[paletteIndex]
 }
 
+/*
 function formatDirectionLabel(value) {
     if (typeof value !== 'string') return ''
 
@@ -142,39 +144,24 @@ function formatDirectionLabel(value) {
         .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
         .join(' ')
 }
+*/
 
 function normalizeRouteFeature(feature, index) {
     if (!feature || !feature.geometry) return null
 
     const properties = feature.properties ?? {}
     const routeNumber = properties.route_num != null ? String(properties.route_num).trim() : ''
-    const routeDescription = properties.route_desc != null ? String(properties.route_desc).trim() : ''
-    const direction = properties.direction != null ? String(properties.direction).trim() : ''
-    const directionLabel = formatDirectionLabel(direction)
+    const routeName = properties.route_desc != null ? String(properties.route_desc).trim() : ''
 
     const fallbackIdParts = []
     if (routeNumber) {
         fallbackIdParts.push(routeNumber)
     }
-    if (directionLabel) {
-        fallbackIdParts.push(directionLabel.toLowerCase().replace(/\s+/g, '-'))
-    }
 
     const fallbackId = fallbackIdParts.join('-') || feature.id || properties.FID || `route-${index}`
     const featureId = feature.id ?? properties.SHAPE_ID ?? properties.FID ?? fallbackId
     const routeId = routeNumber || fallbackId
-    const displayName = routeDescription || (routeNumber ? `Route ${routeNumber}` : 'MBTA Bus Route')
-
-    const descriptionParts = []
-    if (directionLabel) {
-        descriptionParts.push(`${directionLabel} direction`)
-    }
-    if (routeDescription && routeDescription !== displayName) {
-        descriptionParts.push(routeDescription)
-    }
-
-    const description =
-        descriptionParts.join(' • ') || 'Variant from the MBTA Bus Network Redesign dataset.'
+    const displayName = routeName || (routeNumber ? `Route ${routeNumber}` : 'MBTA Bus Route')
 
     return {
         ...feature,
@@ -183,7 +170,6 @@ function normalizeRouteFeature(feature, index) {
             ...properties,
             route_id: routeId,
             name: displayName,
-            description,
             color: getRouteColor(routeId)
         }
     }
@@ -286,7 +272,6 @@ export default function App() {
                 name: feature.properties.name,
                 color: feature.properties.color,
                 isSelected: feature.id === selectedRouteId,
-                description: feature.properties.description
             })),
         [routesData, selectedRouteId]
     )
@@ -433,12 +418,12 @@ export default function App() {
                 selectedRouteIdRef.current = featureId
                 setSelectedRouteId(featureId)
 
-                const { route_id: routeId, name, description } = feature.properties
+                const { route_id: routeId, name } = feature.properties
 
                 popupRef.current
                     ?.setLngLat(event.lngLat)
                     .setHTML(
-                        `<strong>${routeId} ${name}</strong><p>${description}</p><p class="popup-hint">Shift + click anywhere on the map to append a waypoint for this route.</p>`
+                        `<strong>${routeId} ${name}</strong><p class="popup-hint">Shift + click anywhere on the map to append a waypoint for this route.</p>`
                     )
                     .addTo(mapRef.current)
             })
@@ -643,7 +628,6 @@ export default function App() {
                                         <strong>
                                             {item.code} <span>{item.name}</span>
                                         </strong>
-                                        <span className="legend-description">{item.description}</span>
                                     </div>
                                 </div>
                             )
@@ -651,7 +635,7 @@ export default function App() {
                     </div>
                     <p className="legend-note">
                         Routes are sourced from the bundled <code>routes.geojson</code> file. Shift-click the map to
-                        append test waypoints for the selected variant.
+                        append test waypoints for the selected route.
                     </p>
                     {stopDataError ? (
                         <p className="legend-warning">{stopDataError}</p>
