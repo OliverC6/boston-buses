@@ -65,12 +65,46 @@ html, body, #root {
     gap: 12px;
 }
 
+.legend-items {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-height: min(45vh, 420px);
+    overflow-y: auto;
+    padding-right: 6px;
+}
+
+.legend-items::-webkit-scrollbar {
+    width: 6px;
+}
+
+.legend-items::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.04);
+    border-radius: 999px;
+}
+
+.legend-items::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 999px;
+}
+
 .legend h2 {
     margin: 0;
     font-size: 0.95rem;
     letter-spacing: 0.08em;
     text-transform: uppercase;
     color: #4a4a4a;
+}
+
+.legend-error {
+    margin: 0;
+    font-size: 0.8rem;
+    line-height: 1.4;
+    padding: 8px 12px;
+    border-radius: 10px;
+    background: rgba(231, 76, 60, 0.1);
+    color: #b02918;
+    border: 1px solid rgba(231, 76, 60, 0.2);
 }
 
 .legend-row {
