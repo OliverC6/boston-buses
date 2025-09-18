@@ -100,7 +100,6 @@ function getRouteIdFromShape(shape) {
     }
 
     const relationship = shape.relationships?.route?.data
-    console.log("🚀 ~ getRouteIdFromShape ~ relationship:", relationship)
 
     if (Array.isArray(relationship)) {
         for (const item of relationship) {
@@ -334,7 +333,7 @@ async function fetchMbtaRouteMetadata() {
     return routes
 }
 
-async function fetchMbtaShapesForRoutes(routeIds, shapesByRoute, routeMetadata) {
+async function fetchMbtaRouteShapes(routeIds, shapesByRoute, routeMetadata) {
     if (!Array.isArray(routeIds) || !routeIds.length) {
         return
     }
@@ -347,92 +346,95 @@ async function fetchMbtaShapesForRoutes(routeIds, shapesByRoute, routeMetadata) 
         return
     }
 
-    const url = new URL('https://api-v3.mbta.com/shapes')
-    url.searchParams.set('filter[route]', validRouteIds.join(','))
+    for (const routeId of validRouteIds) {
+        if (!routeId) {
+            return
+        }
 
-    const pageLimit = 500
-    let pageOffset = 0
-
-    while (true) {
-        //url.searchParams.set('filter[type]', '3')
-        url.searchParams.set('page[limit]', String(pageLimit))
-        url.searchParams.set('page[offset]', String(pageOffset))
+        const url = new URL('https://api-v3.mbta.com/shapes')
+        url.searchParams.set('filter[route]', routeId)
         url.searchParams.set('include', 'route')
 
-        const response = await fetch(url.toString(), {
-            cache: 'no-cache',
-            headers: MBTA_REQUEST_HEADERS
-        })
+        const pageLimit = 500
+        let pageOffset = 0
 
-        if (!response.ok) {
-            const message = await response.text()
-            throw new Error(`request failed with status ${response.status}: ${message}`)
-        }
+        while (true) {
+            url.searchParams.set('page[limit]', String(pageLimit))
+            url.searchParams.set('page[offset]', String(pageOffset))
 
-        const payload = await response.json()
+            const response = await fetch(url.toString(), {
+                cache: 'no-cache',
+                headers: MBTA_REQUEST_HEADERS
+            })
 
-        if (!payload || !Array.isArray(payload.data)) {
-            throw new Error('unexpected response format from MBTA shapes API')
-        }
-
-        for (const item of payload.data) {
-            console.log("🚀 ~ fetchMbtaShapesForRoutes ~ item:", item)
-            if (!item || typeof item !== 'object') continue
-
-            const routeId = getRouteIdFromShape(item)
-            console.log("🚀 ~ fetchMbtaShapesForRoutes ~ routeId:", routeId)
-            if (!routeId) continue
-
-            const attributes = item.attributes ?? {}
-            const polyline = typeof attributes.polyline === 'string' ? attributes.polyline : ''
-            if (!polyline) continue
-
-            const coordinates = decodePolyline(polyline)
-            if (coordinates.length < 2) continue
-
-            const existing = shapesByRoute.get(routeId)
-
-            if (existing) {
-                existing.push(coordinates)
-            } else {
-                shapesByRoute.set(routeId, [coordinates])
+            if (!response.ok) {
+                const message = await response.text()
+                throw new Error(`request failed with status ${response.status}: ${message}`)
             }
-        }
 
-        if (Array.isArray(payload.included)) {
-            for (const includedItem of payload.included) {
-                if (!includedItem || includedItem.type !== 'route') continue
+            const payload = await response.json()
 
-                const routeId = includedItem.id
-                if (!routeId || routeMetadata.has(routeId)) continue
-
-                const attributes = includedItem.attributes ?? {}
-                const shortName =
-                    typeof attributes.short_name === 'string' ? attributes.short_name.trim() : ''
-                const longName =
-                    typeof attributes.long_name === 'string' ? attributes.long_name.trim() : ''
-                const description =
-                    typeof attributes.description === 'string' ? attributes.description.trim() : ''
-
-                routeMetadata.set(routeId, {
-                    id: routeId,
-                    shortName,
-                    longName,
-                    description
-                })
+            if (!payload || !Array.isArray(payload.data)) {
+                throw new Error('unexpected response format from MBTA shapes API')
             }
-        }
 
-        const hasNextPage = Boolean(payload.links?.next)
+            for (const item of payload.data) {
+                if (!item || typeof item !== 'object') continue
 
-        if (!hasNextPage || payload.data.length < pageLimit) {
-            break
-        }
+                const resolvedRouteId = getRouteIdFromShape(item) || routeId
+                if (!resolvedRouteId) continue
 
-        pageOffset += pageLimit
+                const attributes = item.attributes ?? {}
+                const polyline = typeof attributes.polyline === 'string' ? attributes.polyline : ''
+                if (!polyline) continue
 
-        if (pageOffset > 100000) {
-            throw new Error('pagination limit exceeded while loading MBTA shapes')
+                const coordinates = decodePolyline(polyline)
+                if (coordinates.length < 2) continue
+
+                const existing = shapesByRoute.get(resolvedRouteId)
+
+                if (existing) {
+                    existing.push(coordinates)
+                } else {
+                    shapesByRoute.set(resolvedRouteId, [coordinates])
+                }
+            }
+
+            if (Array.isArray(payload.included)) {
+                for (const includedItem of payload.included) {
+                    if (!includedItem || includedItem.type !== 'route') continue
+
+                    const includedRouteId = includedItem.id
+                    if (!includedRouteId || routeMetadata.has(includedRouteId)) continue
+
+                    const attributes = includedItem.attributes ?? {}
+                    const shortName =
+                        typeof attributes.short_name === 'string' ? attributes.short_name.trim() : ''
+                    const longName =
+                        typeof attributes.long_name === 'string' ? attributes.long_name.trim() : ''
+                    const description =
+                        typeof attributes.description === 'string' ? attributes.description.trim() : ''
+
+                    routeMetadata.set(includedRouteId, {
+                        id: includedRouteId,
+                        shortName,
+                        longName,
+                        description
+                    })
+                }
+            }
+
+            const hasNextPage = Boolean(payload.links?.next)
+
+            if (!hasNextPage || payload.data.length < pageLimit) {
+                break
+            }
+
+            pageOffset += pageLimit
+
+            if (pageOffset > 100000) {
+                throw new Error('pagination limit exceeded while loading MBTA shapes')
+            }
         }
     }
 }
@@ -450,7 +452,7 @@ async function fetchMbtaRoutes() {
 
     for (let index = 0; index < routeIds.length; index += batchSize) {
         const batch = routeIds.slice(index, index + batchSize)
-        await fetchMbtaShapesForRoutes(batch, shapesByRoute, routeMetadata)
+        await fetchMbtaRouteShapes(batch, shapesByRoute, routeMetadata)
     }
 
     if (!shapesByRoute.size) {
