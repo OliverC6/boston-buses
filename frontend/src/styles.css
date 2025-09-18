@@ -162,6 +162,25 @@ html, body, #root {
     line-height: 1.4;
 }
 
+.legend-note code {
+    font-family: 'SFMono-Regular', Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+    font-size: 0.7rem;
+    background: rgba(15, 23, 42, 0.06);
+    border-radius: 6px;
+    padding: 2px 5px;
+}
+
+.legend-warning {
+    margin: 0;
+    font-size: 0.72rem;
+    line-height: 1.4;
+    color: #8a4b05;
+    background: rgba(243, 156, 18, 0.12);
+    border: 1px solid rgba(243, 156, 18, 0.35);
+    border-radius: 10px;
+    padding: 8px 10px;
+}
+
 .maplibregl-popup-content {
     font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
     font-size: 0.85rem;

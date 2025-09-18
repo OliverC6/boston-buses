@@ -32,9 +32,43 @@ function resolveApiBaseUrl() {
 }
 
 const API_BASE_URL = resolveApiBaseUrl()
-console.log("🚀 ~ API_BASE_URL:", API_BASE_URL)
-const ROUTES_LAYER_ID = 3
 const EMPTY_GEOJSON = { type: 'FeatureCollection', features: [] }
+
+const APP_BASE_PATH = typeof import.meta?.env?.BASE_URL === 'string' ? import.meta.env.BASE_URL : '/'
+
+function normalizeBasePath(basePath) {
+    if (typeof basePath !== 'string') return ''
+
+    const trimmed = basePath.trim()
+
+    if (trimmed === '' || trimmed === '/') {
+        return ''
+    }
+
+    return trimmed.endsWith('/') ? trimmed.slice(0, -1) : trimmed
+}
+
+const NORMALIZED_BASE_PATH = normalizeBasePath(APP_BASE_PATH)
+
+function withBasePath(path) {
+    const normalizedPath = path.startsWith('/') ? path : `/${path}`
+
+    if (!NORMALIZED_BASE_PATH) {
+        return normalizedPath
+    }
+
+    return `${NORMALIZED_BASE_PATH}${normalizedPath}`
+}
+
+const ROUTES_GEOJSON_CANDIDATE_PATHS = Array.from(
+    new Set([
+        withBasePath('/data/routes.geojson'),
+        withBasePath('/routes.geojson'),
+        '/data/routes.geojson',
+        '/routes.geojson',
+        'data/routes.geojson'
+    ])
+)
 
 // Layer Configs
 const STOP_LAYER_CONFIGS = [
@@ -96,56 +130,115 @@ function getRouteColor(routeId) {
     return COLOR_PALETTE[paletteIndex]
 }
 
-// Fetch Functions
-async function fetchLayerFeatures(layerId) {
-    const response = await fetch(`${API_BASE_URL}/api/massgis/layers/${layerId}`)
+function formatDirectionLabel(value) {
+    if (typeof value !== 'string') return ''
 
-    if (!response.ok) {
-        const message = await response.text()
-        throw new Error(`MassGIS layer ${layerId} request failed: ${response.status} ${message}`)
-    }
+    const trimmed = value.trim()
 
-    return response.json()
+    if (!trimmed) return ''
+
+    return trimmed
+        .split(/\s+/)
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+        .join(' ')
 }
 
-async function fetchMassGisRoutes() {
-    const featureCollection = await fetchLayerFeatures(ROUTES_LAYER_ID)
+function normalizeRouteFeature(feature, index) {
+    if (!feature || !feature.geometry) return null
+
+    const properties = feature.properties ?? {}
+    const routeNumber = properties.route_num != null ? String(properties.route_num).trim() : ''
+    const routeDescription = properties.route_desc != null ? String(properties.route_desc).trim() : ''
+    const direction = properties.direction != null ? String(properties.direction).trim() : ''
+    const directionLabel = formatDirectionLabel(direction)
+
+    const fallbackIdParts = []
+    if (routeNumber) {
+        fallbackIdParts.push(routeNumber)
+    }
+    if (directionLabel) {
+        fallbackIdParts.push(directionLabel.toLowerCase().replace(/\s+/g, '-'))
+    }
+
+    const fallbackId = fallbackIdParts.join('-') || feature.id || properties.FID || `route-${index}`
+    const featureId = feature.id ?? properties.SHAPE_ID ?? properties.FID ?? fallbackId
+    const routeId = routeNumber || fallbackId
+    const displayName = routeDescription || (routeNumber ? `Route ${routeNumber}` : 'MBTA Bus Route')
+
+    const descriptionParts = []
+    if (directionLabel) {
+        descriptionParts.push(`${directionLabel} direction`)
+    }
+    if (routeDescription && routeDescription !== displayName) {
+        descriptionParts.push(routeDescription)
+    }
+
+    const description =
+        descriptionParts.join(' • ') || 'Variant from the MBTA Bus Network Redesign dataset.'
 
     return {
-        type: 'FeatureCollection',
-        features: featureCollection.features
-            .map((feature) => {
-                if (!feature?.geometry) return null
-
-                const properties = feature.properties ?? {}
-                const routeId = (properties.MBTA_ROUTE || '').trim()
-                const variant = (properties.MBTA_ROUTEVAR || '').trim()
-                const headsign = (properties.TRIP_HEADSIGN || '').trim()
-                const descriptor = (properties.ROUTE_DESC || '').trim()
-                const color = getRouteColor(routeId || variant)
-
-                const displayName = descriptor || headsign || (routeId ? `Route ${routeId}` : 'MBTA Bus Route')
-                const descriptionParts = [descriptor, headsign]
-                    .map((part) => part && part.trim())
-                    .filter(Boolean)
-                const description = descriptionParts.join(' • ') || 'Variant from the MassGIS MBTA Bus Routes layer.'
-
-                return {
-                    ...feature,
-                    id: properties.SHAPE_ID || properties.OBJECTID || `${routeId}-${variant}` || feature.id,
-                    properties: {
-                        ...properties,
-                        route_id: routeId || variant || 'N/A',
-                        name: displayName,
-                        description,
-                        color
-                    }
-                }
-            })
-            .filter(Boolean)
+        ...feature,
+        id: featureId,
+        properties: {
+            ...properties,
+            route_id: routeId,
+            name: displayName,
+            description,
+            color: getRouteColor(routeId)
+        }
     }
 }
 
+function getErrorMessage(error, fallbackMessage) {
+    if (error instanceof Error) return error.message
+    if (typeof error === 'string' && error.trim() !== '') return error
+    return fallbackMessage
+}
+
+async function fetchRoutesFromGeoJson() {
+    let lastError = null
+
+    for (const path of ROUTES_GEOJSON_CANDIDATE_PATHS) {
+        try {
+            const response = await fetch(path, { cache: 'no-cache' })
+
+            if (!response.ok) {
+                const message = await response.text()
+                throw new Error(`request failed with status ${response.status}: ${message}`)
+            }
+
+            const featureCollection = await response.json()
+
+            if (!featureCollection || !Array.isArray(featureCollection.features)) {
+                throw new Error('missing features array in GeoJSON file')
+            }
+
+            const features = featureCollection.features
+                .map((feature, index) => normalizeRouteFeature(feature, index))
+                .filter(Boolean)
+
+            if (!features.length) {
+                throw new Error('no usable bus routes found in GeoJSON file')
+            }
+
+            return { type: 'FeatureCollection', features }
+        } catch (error) {
+            lastError =
+                error instanceof Error
+                    ? error
+                    : new Error('Unexpected error while loading routes GeoJSON')
+        }
+    }
+
+    const message =
+        lastError?.message
+            ? `Unable to load routes from local GeoJSON: ${lastError.message}`
+            : 'Unable to load routes from local GeoJSON file.'
+
+    throw new Error(message)
+}
+
+/*
 async function fetchMassGisStops() {
     const entries = await Promise.all(
         STOP_LAYER_CONFIGS.map(async (config) => {
@@ -156,6 +249,7 @@ async function fetchMassGisStops() {
 
     return Object.fromEntries(entries)
 }
+*/
 
 // Component
 export default function App() {
@@ -174,6 +268,7 @@ export default function App() {
     const [mapIsReady, setMapIsReady] = useState(false)
     const [isFetchingData, setIsFetchingData] = useState(false)
     const [dataError, setDataError] = useState(null)
+    const [stopDataError, setStopDataError] = useState(null)
 
     // Memo
     const legendItems = useMemo(
@@ -433,17 +528,24 @@ export default function App() {
         const loadData = async () => {
             setIsFetchingData(true)
             setDataError(null)
+            setStopDataError(null)
 
             try {
-                const [routes, stops] = await Promise.all([fetchMassGisRoutes(), fetchMassGisStops()])
+                const [routesResult] = await Promise.allSettled([
+                    fetchRoutesFromGeoJson(),
+                    //fetchMassGisStops()
+                ])
 
                 if (cancelled) return
 
-                setRoutesData(routes)
-                setStopData(stops)
-            } catch (error) {
-                if (!cancelled) {
-                    const message = error instanceof Error ? error.message : 'Failed to load MassGIS data'
+                if (routesResult.status === 'fulfilled') {
+                    setRoutesData(routesResult.value)
+                } else {
+                    const message = getErrorMessage(
+                        routesResult.reason,
+                        'Failed to load routes from the local GeoJSON file.'
+                    )
+                    setRoutesData(EMPTY_GEOJSON)
                     setDataError(message)
                 }
             } finally {
@@ -519,7 +621,7 @@ export default function App() {
                     {dataError ? (
                         <p className="legend-error">{dataError}</p>
                     ) : isFetchingData && !legendItems.length ? (
-                        <p className="legend-note">Loading MassGIS bus routes…</p>
+                        <p className="legend-note">Loading bus routes from the local GeoJSON file…</p>
                     ) : null}
                     <div className="legend-items">
                         {legendItems.map((item) => {
@@ -548,9 +650,17 @@ export default function App() {
                         })}
                     </div>
                     <p className="legend-note">
-                        Routes and stops from the MassGIS MBTA Bus Stops &amp; Routes dataset. Shift-click the
-                        map to append test waypoints for the selected variant.
+                        Routes are sourced from the bundled <code>routes.geojson</code> file. Shift-click the map to
+                        append test waypoints for the selected variant.
                     </p>
+                    {stopDataError ? (
+                        <p className="legend-warning">{stopDataError}</p>
+                    ) : (
+                        <p className="legend-note">
+                            MassGIS bus stop overlays continue to load from the live service whenever it is
+                            reachable.
+                        </p>
+                    )}
                 </div>
             </div>
             <div ref={mapContainer} className="map" />
