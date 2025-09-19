@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 
+// API
 const MBTA_API_KEY =
     typeof import.meta.env.VITE_MBTA_API_KEY === 'string'
         ? import.meta.env.VITE_MBTA_API_KEY.trim()
@@ -41,6 +42,13 @@ const STOP_LAYER = {
         strokeColor: '#ffffff'
     }
 }
+
+// Frequency Estimation Constants
+const SECONDS_PER_MINUTE = 60
+const METERS_PER_MILE = 1609.34
+const AVERAGE_BUS_SPEED_MPH = 12
+const DWELL_TIME_PER_STOP_SECONDS = 30
+const MAX_ADJUSTED_STOPS = 400
 
 // Colors
 const COLOR_PALETTE = [
@@ -266,6 +274,419 @@ function decodePolyline(encoded) {
     }
 
     return coordinates
+}
+
+function haversineDistanceMeters(a, b) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== 2 || b.length !== 2) {
+        return 0
+    }
+
+    const [lng1, lat1] = a
+    const [lng2, lat2] = b
+
+    const toRadians = (value) => (value * Math.PI) / 180
+
+    const dLat = toRadians(lat2 - lat1)
+    const dLng = toRadians(lng2 - lng1)
+    const radLat1 = toRadians(lat1)
+    const radLat2 = toRadians(lat2)
+
+    const sinLat = Math.sin(dLat / 2)
+    const sinLng = Math.sin(dLng / 2)
+    const haversine = sinLat * sinLat + Math.cos(radLat1) * Math.cos(radLat2) * sinLng * sinLng
+    const arc = 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine))
+    const earthRadiusMeters = 6371000
+
+    return earthRadiusMeters * arc
+}
+
+function calculateLineDistanceInMeters(coordinates) {
+    if (!Array.isArray(coordinates) || coordinates.length < 2) {
+        return 0
+    }
+
+    let total = 0
+
+    for (let index = 1; index < coordinates.length; index += 1) {
+        total += haversineDistanceMeters(coordinates[index - 1], coordinates[index])
+    }
+
+    return total
+}
+
+function calculateGeometryLengthInMeters(geometry) {
+    if (!geometry || typeof geometry !== 'object') {
+        return 0
+    }
+
+    if (geometry.type === 'LineString') {
+        return calculateLineDistanceInMeters(geometry.coordinates)
+    }
+
+    if (geometry.type === 'MultiLineString') {
+        return Array.isArray(geometry.coordinates)
+            ? geometry.coordinates.reduce((sum, line) => sum + calculateLineDistanceInMeters(line), 0)
+            : 0
+    }
+
+    return 0
+}
+
+function calculateEstimatedFrequencyMinutes(routeLengthMeters, stopCount) {
+    const length = Number(routeLengthMeters)
+    const stops = Math.max(0, Number.isFinite(stopCount) ? stopCount : 0)
+
+    const speedMetersPerMinute = (AVERAGE_BUS_SPEED_MPH * METERS_PER_MILE) / SECONDS_PER_MINUTE
+    const travelMinutes = Number.isFinite(length) && length > 0 ? length / speedMetersPerMinute : 0
+    const dwellMinutes = stops * (DWELL_TIME_PER_STOP_SECONDS / SECONDS_PER_MINUTE)
+    const total = travelMinutes + dwellMinutes
+
+    if (!Number.isFinite(total) || total <= 0) {
+        return dwellMinutes > 0 ? dwellMinutes : null
+    }
+
+    return total
+}
+
+function interpolateCoordinate(start, end, t) {
+    if (!Array.isArray(start) || !Array.isArray(end) || start.length !== 2 || end.length !== 2) {
+        return null
+    }
+
+    const clampedT = Math.min(Math.max(t, 0), 1)
+
+    return [
+        start[0] + (end[0] - start[0]) * clampedT,
+        start[1] + (end[1] - start[1]) * clampedT
+    ]
+}
+
+function sampleCoordinatesAlongGeometry(geometry, count) {
+    const targetCount = Math.max(0, Math.floor(count))
+
+    if (!geometry || typeof geometry !== 'object' || targetCount <= 0) {
+        return []
+    }
+
+    const lineStrings = []
+
+    if (geometry.type === 'LineString') {
+        lineStrings.push(geometry.coordinates)
+    } else if (geometry.type === 'MultiLineString' && Array.isArray(geometry.coordinates)) {
+        for (const line of geometry.coordinates) {
+            lineStrings.push(line)
+        }
+    }
+
+    const segments = []
+
+    for (const line of lineStrings) {
+        if (!Array.isArray(line) || line.length < 2) continue
+
+        for (let index = 1; index < line.length; index += 1) {
+            const start = line[index - 1]
+            const end = line[index]
+            const length = haversineDistanceMeters(start, end)
+
+            if (length > 0) {
+                segments.push({ start, end, length })
+            }
+        }
+    }
+
+    if (!segments.length) {
+        const fallback = lineStrings.find((line) => Array.isArray(line) && line.length)?.[0]
+        if (!fallback) return []
+        return Array.from({ length: targetCount }, () => [...fallback])
+    }
+
+    const totalLength = segments.reduce((sum, segment) => sum + segment.length, 0)
+
+    if (totalLength <= 0) {
+        const first = segments[0].start
+        return Array.from({ length: targetCount }, () => [...first])
+    }
+
+    if (targetCount === 1) {
+        return [[...segments[0].start]]
+    }
+
+    const spacing = totalLength / (targetCount - 1)
+    const coordinates = []
+    let accumulated = 0
+    let segmentIndex = 0
+
+    for (let index = 0; index < targetCount; index += 1) {
+        const targetDistance = spacing * index
+
+        while (
+            segmentIndex < segments.length - 1 &&
+            accumulated + segments[segmentIndex].length < targetDistance
+        ) {
+            accumulated += segments[segmentIndex].length
+            segmentIndex += 1
+        }
+
+        const segment = segments[segmentIndex]
+
+        if (!segment) {
+            coordinates.push([...segments[segments.length - 1].end])
+            continue
+        }
+
+        const distanceIntoSegment = targetDistance - accumulated
+        const ratio = segment.length === 0 ? 0 : distanceIntoSegment / segment.length
+        const interpolated = interpolateCoordinate(segment.start, segment.end, ratio)
+
+        coordinates.push(interpolated ? [...interpolated] : [...segment.start])
+    }
+
+    return coordinates
+}
+
+function selectEvenlySpacedStops(features, targetCount) {
+    if (!Array.isArray(features) || !features.length || targetCount <= 0) {
+        return []
+    }
+
+    if (targetCount >= features.length) {
+        return features.slice()
+    }
+
+    if (targetCount === 1) {
+        return [features[0]]
+    }
+
+    const result = []
+    const interval = (features.length - 1) / (targetCount - 1)
+
+    for (let index = 0; index < targetCount; index += 1) {
+        const position = index * interval
+        const sourceIndex = Math.min(Math.round(position), features.length - 1)
+        const feature = features[sourceIndex]
+
+        if (feature) {
+            result.push(feature)
+        }
+    }
+
+    return result
+}
+
+function createGeneratedStopFeature(coordinate, index, name) {
+    if (!Array.isArray(coordinate) || coordinate.length !== 2) {
+        return null
+    }
+
+    return {
+        type: 'Feature',
+        id: `generated-stop-${index}`,
+        geometry: {
+            type: 'Point',
+            coordinates: [...coordinate]
+        },
+        properties: {
+            name: name || `Proposed Stop ${index + 1}`,
+            description: 'Synthetic stop for frequency scenario testing.',
+            isSynthetic: true
+        }
+    }
+}
+
+function buildAdjustedStopCollection(baseCollection, geometry, targetCount) {
+    const count = Math.max(0, Math.floor(targetCount))
+
+    if (count <= 0) {
+        return { type: 'FeatureCollection', features: [] }
+    }
+
+    const baseFeatures = Array.isArray(baseCollection?.features)
+        ? baseCollection.features.filter((feature) => feature?.geometry?.type === 'Point')
+        : []
+    const baseCount = baseFeatures.length
+
+    if (baseCount === 0) {
+        const generatedCoordinates = sampleCoordinatesAlongGeometry(geometry, count)
+        const generatedFeatures = generatedCoordinates
+            .map((coordinate, index) => createGeneratedStopFeature(coordinate, index, `Proposed Stop ${index + 1}`))
+            .filter(Boolean)
+
+        return { type: 'FeatureCollection', features: generatedFeatures.slice(0, count) }
+    }
+
+    if (count <= baseCount) {
+        const reduced = selectEvenlySpacedStops(baseFeatures, count)
+        return { type: 'FeatureCollection', features: reduced }
+    }
+
+    const additionalNeeded = count - baseCount
+
+    if (baseCount < 2) {
+        const coordinates = sampleCoordinatesAlongGeometry(geometry, additionalNeeded)
+        const generated = coordinates
+            .map((coordinate, index) =>
+                createGeneratedStopFeature(coordinate, baseCount + index, `Proposed Stop ${baseCount + index + 1}`)
+            )
+            .filter(Boolean)
+
+        const combined = [...baseFeatures, ...generated]
+        return { type: 'FeatureCollection', features: combined.slice(0, count) }
+    }
+
+    const segments = []
+
+    for (let index = 1; index < baseCount; index += 1) {
+        const previous = baseFeatures[index - 1]?.geometry?.coordinates
+        const current = baseFeatures[index]?.geometry?.coordinates
+
+        if (!previous || !current) continue
+
+        const length = haversineDistanceMeters(previous, current)
+        segments.push({ start: previous, end: current, length })
+    }
+
+    const allocations = new Array(segments.length).fill(0)
+
+    if (segments.length) {
+        const totalLength = segments.reduce((sum, segment) => sum + (segment.length || 0), 0)
+
+        if (totalLength > 0) {
+            const remainders = []
+            let allocated = 0
+
+            for (let index = 0; index < segments.length; index += 1) {
+                const segment = segments[index]
+                const exactShare = (segment.length / totalLength) * additionalNeeded
+                const floorShare = Math.floor(exactShare)
+                allocations[index] = floorShare
+                allocated += floorShare
+                remainders.push({ index, remainder: exactShare - floorShare })
+            }
+
+            let remaining = additionalNeeded - allocated
+
+            const sortedRemainders = remainders.sort((a, b) => b.remainder - a.remainder)
+
+            for (const item of sortedRemainders) {
+                if (remaining <= 0) {
+                    break
+                }
+
+                allocations[item.index] += 1
+                remaining -= 1
+            }
+
+            let cycleIndex = 0
+
+            while (remaining > 0) {
+                const target = allocations.length ? cycleIndex % allocations.length : 0
+                allocations[target] += 1
+                remaining -= 1
+                cycleIndex += 1
+            }
+        } else {
+            let assigned = 0
+            while (assigned < additionalNeeded) {
+                const target = assigned % allocations.length
+                allocations[target] += 1
+                assigned += 1
+            }
+        }
+    }
+
+    const generatedStops = []
+    const orderedFeatures = []
+
+    if (baseCount > 0) {
+        orderedFeatures.push(baseFeatures[0])
+
+        for (let index = 1; index < baseCount; index += 1) {
+            const allocation = allocations[index - 1] ?? 0
+            const segment = segments[index - 1]
+
+            if (allocation > 0 && segment) {
+                for (let step = 1; step <= allocation; step += 1) {
+                    const ratio = step / (allocation + 1)
+                    const coordinate = interpolateCoordinate(segment.start, segment.end, ratio)
+                    const feature = createGeneratedStopFeature(
+                        coordinate,
+                        baseCount + generatedStops.length,
+                        `Proposed Stop ${baseCount + generatedStops.length + 1}`
+                    )
+
+                    if (feature) {
+                        generatedStops.push(feature)
+                        orderedFeatures.push(feature)
+                    }
+                }
+            }
+
+            orderedFeatures.push(baseFeatures[index])
+        }
+    }
+
+    if (generatedStops.length < additionalNeeded) {
+        const fallbackCoordinates = sampleCoordinatesAlongGeometry(geometry, additionalNeeded - generatedStops.length)
+
+        for (const coordinate of fallbackCoordinates) {
+            const feature = createGeneratedStopFeature(
+                coordinate,
+                baseCount + generatedStops.length,
+                `Proposed Stop ${baseCount + generatedStops.length + 1}`
+            )
+
+            if (!feature) continue
+
+            generatedStops.push(feature)
+            orderedFeatures.push(feature)
+
+            if (generatedStops.length >= additionalNeeded) {
+                break
+            }
+        }
+    }
+
+    const combined = orderedFeatures.length ? orderedFeatures : [...baseFeatures, ...generatedStops]
+
+    return { type: 'FeatureCollection', features: combined.slice(0, count) }
+}
+
+function escapeHtml(value) {
+    if (typeof value !== 'string') {
+        return ''
+    }
+
+    return value
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;')
+}
+
+function formatFrequencyMinutes(minutes) {
+    if (!Number.isFinite(minutes) || minutes <= 0) {
+        return '—'
+    }
+
+    if (minutes < 1) {
+        return `${minutes.toFixed(2)} min`
+    }
+
+    if (minutes < 10) {
+        return `${minutes.toFixed(1)} min`
+    }
+
+    return `${minutes.toFixed(0)} min`
+}
+
+// Defaults
+const DEFAULT_STOP_SCENARIO = {
+    baseCount: 0,
+    adjustedCount: 0,
+    factor: 1,
+    baseFrequencyMinutes: null,
+    adjustedFrequencyMinutes: null
 }
 
 // Async Functions
@@ -599,7 +1020,11 @@ export default function App() {
     const hoveredRouteRef = useRef(null)
     const mapReadyRef = useRef(false)
     const selectedRouteIdRef = useRef(null)
+    const selectedRouteFeatureRef = useRef(null)
+    const selectedRouteLengthRef = useRef(0)
     const stopCacheRef = useRef(new Map())
+    const baseStopCollectionRef = useRef(EMPTY_GEOJSON)
+    const stopScenarioRef = useRef({ ...DEFAULT_STOP_SCENARIO })
 
     // States
     const [routesData, setRoutesData] = useState(EMPTY_GEOJSON)
@@ -609,7 +1034,217 @@ export default function App() {
     const [isFetchingStops, setIsFetchingStops] = useState(false)
     const [dataError, setDataError] = useState(null)
     const [stopDataError, setStopDataError] = useState(null)
-    const [visibleStopCount, setVisibleStopCount] = useState(0)
+    //const [visibleStopCount, setVisibleStopCount] = useState(0)
+    const [stopDisplayCollection, setStopDisplayCollection] = useState(EMPTY_GEOJSON)
+    const [stopScenarioState, setStopScenarioState] = useState({ ...DEFAULT_STOP_SCENARIO })
+
+    // Callbacks
+    const updateStopScenario = useCallback((scenario) => {
+        const merged = { ...DEFAULT_STOP_SCENARIO, ...scenario }
+        stopScenarioRef.current = merged
+        setStopScenarioState(merged)
+    }, [])
+
+    const adjustStopsByPercentage = useCallback(
+        (change) => {
+            const routeFeature = selectedRouteFeatureRef.current
+            const geometry = routeFeature?.geometry
+
+            if (!geometry) return
+
+            const baseCollection = baseStopCollectionRef.current
+            const baseFeatures = Array.isArray(baseCollection?.features)
+                ? baseCollection.features.filter((feature) => feature?.geometry?.type === 'Point')
+                : []
+            const baseCount = baseFeatures.length
+
+            const currentScenario = stopScenarioRef.current
+            const currentAdjustedCount = currentScenario.adjustedCount || baseCount || 1
+
+            const maxCount = MAX_ADJUSTED_STOPS
+            let targetCount
+            let nextFactor
+
+            if (baseCount > 0) {
+                const currentFactor = currentScenario.factor || currentAdjustedCount / baseCount || 1
+                const proposedFactor = currentFactor * (1 + change)
+                const minFactor = 1 / baseCount
+                const maxFactor = maxCount / baseCount
+                const boundedFactor = Math.min(Math.max(proposedFactor, minFactor), maxFactor)
+                targetCount = Math.max(1, Math.round(baseCount * boundedFactor))
+
+                if (targetCount === currentAdjustedCount) {
+                    if (change > 0 && targetCount < maxCount) {
+                        targetCount += 1
+                    } else if (change < 0 && targetCount > 1) {
+                        targetCount -= 1
+                    }
+                }
+
+                nextFactor = targetCount / baseCount
+            } else {
+                const proposedCount = Math.round(currentAdjustedCount * (1 + change))
+                targetCount = Math.max(1, Math.min(maxCount, proposedCount || 1))
+
+                if (targetCount === currentAdjustedCount) {
+                    if (change > 0 && targetCount < maxCount) {
+                        targetCount += 1
+                    } else if (change < 0 && targetCount > 1) {
+                        targetCount -= 1
+                    }
+                }
+
+                nextFactor = currentScenario.factor || 1
+            }
+
+            targetCount = Math.max(1, Math.min(maxCount, targetCount))
+
+            if (!Number.isFinite(targetCount) || targetCount <= 0) {
+                return
+            }
+
+            const routeLength =
+                selectedRouteLengthRef.current || calculateGeometryLengthInMeters(geometry)
+
+            if (Number.isFinite(routeLength)) {
+                selectedRouteLengthRef.current = routeLength
+            }
+
+            const adjustedCollection = buildAdjustedStopCollection(baseCollection, geometry, targetCount)
+            setStopDisplayCollection(adjustedCollection)
+
+            const adjustedFrequency = calculateEstimatedFrequencyMinutes(routeLength, targetCount)
+            const baseFrequency =
+                currentScenario.baseFrequencyMinutes ??
+                calculateEstimatedFrequencyMinutes(routeLength, baseCount)
+
+            updateStopScenario({
+                baseCount,
+                adjustedCount: targetCount,
+                factor: nextFactor,
+                baseFrequencyMinutes: baseFrequency,
+                adjustedFrequencyMinutes: adjustedFrequency
+            })
+        },
+        [updateStopScenario]
+    )
+
+    const handleIncreaseStops = useCallback(
+        (event) => {
+            if (event && typeof event.preventDefault === 'function') {
+                event.preventDefault()
+            }
+            adjustStopsByPercentage(0.25)
+        },
+        [adjustStopsByPercentage]
+    )
+
+    const handleDecreaseStops = useCallback(
+        (event) => {
+            if (event && typeof event.preventDefault === 'function') {
+                event.preventDefault()
+            }
+            adjustStopsByPercentage(-0.25)
+        },
+        [adjustStopsByPercentage]
+    )
+
+    const updatePopupContent = useCallback(() => {
+        if (!popupRef.current) return
+
+        const isPopupOpen = typeof popupRef.current.isOpen === 'function' ? popupRef.current.isOpen() : true
+
+        if (!isPopupOpen) {
+            return
+        }
+
+        const feature = selectedRouteFeatureRef.current
+        if (!feature) return
+
+        const routeId = feature.properties?.route_id ?? ''
+        const routeName = feature.properties?.name ?? ''
+        const headerLabel =
+            selectedRouteLabel || [routeId, routeName].filter(Boolean).join(' ').trim() || 'MBTA Bus Route'
+
+        const scenario = stopScenarioRef.current
+        const frequencyText = formatFrequencyMinutes(scenario.adjustedFrequencyMinutes)
+        const baseFrequencyText = formatFrequencyMinutes(scenario.baseFrequencyMinutes)
+
+        const adjustedCountNumber = Number.isFinite(scenario.adjustedCount) ? scenario.adjustedCount : 0
+        const baseCountNumber = Number.isFinite(scenario.baseCount) ? scenario.baseCount : 0
+        const adjustedCountText = adjustedCountNumber.toLocaleString()
+        const baseCountText = baseCountNumber.toLocaleString()
+
+        const scenarioInfoParts = []
+
+        if (Number.isFinite(scenario.baseFrequencyMinutes)) {
+            scenarioInfoParts.push(`Baseline ${baseFrequencyText}`)
+        }
+
+        if (baseCountNumber > 0) {
+            if (adjustedCountNumber !== baseCountNumber) {
+                scenarioInfoParts.push(`Stops ${adjustedCountText} (base ${baseCountText})`)
+            } else {
+                scenarioInfoParts.push(`Stops ${adjustedCountText}`)
+            }
+        } else {
+            scenarioInfoParts.push(`Stops ${adjustedCountText}`)
+        }
+
+        const disableButtons = Boolean(isFetchingStops || !feature.geometry || stopDataError)
+        const buttonDisabledAttr = disableButtons ? ' disabled aria-disabled="true"' : ''
+
+        const infoHtml = scenarioInfoParts.length
+            ? `<p class="popup-meta">${scenarioInfoParts
+                  .map((part) => escapeHtml(part))
+                  .join(' &bull; ')}</p>`
+            : ''
+
+        const loadingHtml = isFetchingStops ? '<p class="popup-note">Loading stops…</p>' : ''
+        const noStopsHtml =
+            !isFetchingStops && !stopDataError && baseCountNumber === 0 && adjustedCountNumber === 0
+                ? '<p class="popup-note">No stops are currently loaded for this route.</p>'
+                : ''
+        const errorHtml = stopDataError
+            ? `<p class="popup-error">${escapeHtml(stopDataError)}</p>`
+            : ''
+
+        const html = `
+            <div class="popup-content">
+                <strong>${escapeHtml(headerLabel)}</strong>
+                <p class="popup-frequency">
+                    Estimated frequency
+                    <span class="popup-frequency-value">${escapeHtml(frequencyText)}</span>
+                </p>
+                ${infoHtml}
+                <div class="popup-actions">
+                    <button type="button" data-action="decrease"${buttonDisabledAttr}>-25% stops</button>
+                    <button type="button" data-action="increase"${buttonDisabledAttr}>+25% stops</button>
+                </div>
+                ${errorHtml}
+                ${loadingHtml || noStopsHtml}
+                <p class="popup-hint">Shift + click anywhere on the map to append a stop for this route.</p>
+            </div>
+        `
+
+        popupRef.current.setHTML(html)
+
+        const popupElement = popupRef.current.getElement()
+        if (!popupElement || disableButtons) {
+            return
+        }
+
+        const increaseButton = popupElement.querySelector('[data-action="increase"]')
+        const decreaseButton = popupElement.querySelector('[data-action="decrease"]')
+
+        if (increaseButton) {
+            increaseButton.addEventListener('click', handleIncreaseStops, { once: false })
+        }
+
+        if (decreaseButton) {
+            decreaseButton.addEventListener('click', handleDecreaseStops, { once: false })
+        }
+    }, [handleDecreaseStops, handleIncreaseStops, isFetchingStops, selectedRouteLabel, stopDataError])
 
     // Memos
     const legendItems = useMemo(
@@ -657,7 +1292,7 @@ export default function App() {
         return selectedRouteId
     }, [selectedLegendItem, selectedRouteId])
 
-    const stopCount = visibleStopCount
+    const stopCount = stopScenarioState.adjustedCount ?? 0
 
     // Effects
     useEffect(() => {
@@ -809,16 +1444,50 @@ export default function App() {
                 if (featureId === undefined || featureId === null) return
 
                 selectedRouteIdRef.current = featureId
+                selectedRouteFeatureRef.current = feature
+
+                const geometryLength = calculateGeometryLengthInMeters(feature.geometry)
+                if (Number.isFinite(geometryLength)) {
+                    selectedRouteLengthRef.current = geometryLength
+                } else {
+                    selectedRouteLengthRef.current = 0
+                }
+
                 setSelectedRouteId(featureId)
 
-                const { route_id: routeId, name } = feature.properties
+                const cachedCollection = stopCacheRef.current.get(featureId)
+
+                if (cachedCollection) {
+                    baseStopCollectionRef.current = cachedCollection
+                    setStopDisplayCollection(cachedCollection)
+
+                    const baseCount = Array.isArray(cachedCollection?.features)
+                        ? cachedCollection.features.length
+                        : 0
+                    const baseFrequency = calculateEstimatedFrequencyMinutes(
+                        selectedRouteLengthRef.current,
+                        baseCount
+                    )
+
+                    updateStopScenario({
+                        baseCount,
+                        adjustedCount: baseCount,
+                        factor: baseCount > 0 ? 1 : 1,
+                        baseFrequencyMinutes: baseFrequency,
+                        adjustedFrequencyMinutes: baseFrequency
+                    })
+                } else {
+                    baseStopCollectionRef.current = EMPTY_GEOJSON
+                    setStopDisplayCollection(EMPTY_GEOJSON)
+                    updateStopScenario(DEFAULT_STOP_SCENARIO)
+                }
 
                 popupRef.current
                     ?.setLngLat(event.lngLat)
-                    .setHTML(
-                        `<strong>${routeId} ${name}</strong><p class="popup-hint">Shift + click anywhere on the map to append a stop for this route.</p>`
-                    )
+                    .setHTML('<p class="popup-note">Loading route details…</p>')
                     .addTo(mapRef.current)
+
+                updatePopupContent()
             })
 
             mapRef.current.on('click', (event) => {
@@ -881,7 +1550,12 @@ export default function App() {
 
                 if (!features.length) {
                     selectedRouteIdRef.current = null
+                    selectedRouteFeatureRef.current = null
+                    selectedRouteLengthRef.current = 0
                     setSelectedRouteId(null)
+                    baseStopCollectionRef.current = EMPTY_GEOJSON
+                    setStopDisplayCollection(EMPTY_GEOJSON)
+                    updateStopScenario(DEFAULT_STOP_SCENARIO)
                     popupRef.current?.remove()
                 }
             })
@@ -894,6 +1568,10 @@ export default function App() {
             hoveredRouteRef.current = null
             mapReadyRef.current = false
             selectedRouteIdRef.current = null
+            selectedRouteFeatureRef.current = null
+            selectedRouteLengthRef.current = 0
+            baseStopCollectionRef.current = EMPTY_GEOJSON
+            stopScenarioRef.current = { ...DEFAULT_STOP_SCENARIO }
             setMapIsReady(false)
         }
     }, [])
@@ -909,38 +1587,8 @@ export default function App() {
             setStopDataError(null)
 
             try {
-                /*
-                const [routesResult, stopsResult] = await Promise.allSettled([
-                    fetchMbtaRoutes(),
-                    fetchMbtaStops()
-                ])
-                */
                 const routesResult = await fetchMbtaRoutes()
                 if (cancelled) return
-
-                /*
-                if (routesResult.status === 'fulfilled') {
-                    setRoutesData(routesResult.value)
-                } else {
-                    const message = getErrorMessage(
-                        routesResult.reason,
-                        'Failed to load routes from the MBTA API.'
-                    )
-                    setRoutesData(EMPTY_GEOJSON)
-                    setDataError(message)
-                }
-
-                if (stopsResult.status === 'fulfilled') {
-                    setStopData(stopsResult.value)
-                } else {
-                    const message = getErrorMessage(
-                        stopsResult.reason,
-                        'Failed to load bus stops from the MBTA API.'
-                    )
-                    setStopData({})
-                    setStopDataError(message)
-                }
-                */
                setRoutesData(routesResult)
             } catch (error) {
                 if (cancelled) return
@@ -983,43 +1631,62 @@ export default function App() {
         const sourceId = STOP_LAYER?.sourceId
         if (!sourceId) return
 
-        const source = mapRef.current.getSource(sourceId)
-        if (!source) return
-
         let cancelled = false
 
-        const updateSourceData = (data) => {
-            source.setData(data)
-        }
-
-        const resetStops = () => {
-            updateSourceData(EMPTY_GEOJSON)
-            if (!cancelled) {
-                setVisibleStopCount(0)
-            }
+        const resetScenario = () => {
+            if (cancelled) return
+            baseStopCollectionRef.current = EMPTY_GEOJSON
+            setStopDisplayCollection(EMPTY_GEOJSON)
+            updateStopScenario(DEFAULT_STOP_SCENARIO)
         }
 
         if (!selectedRouteId) {
             setIsFetchingStops(false)
             setStopDataError(null)
-            resetStops()
+            resetScenario()
             return
         }
 
         setStopDataError(null)
 
+        const computedRouteLength =
+            selectedRouteLengthRef.current ||
+            calculateGeometryLengthInMeters(selectedRouteFeatureRef.current?.geometry)
+
+        if (Number.isFinite(computedRouteLength)) {
+            selectedRouteLengthRef.current = computedRouteLength
+        }
+
+        const applyCollection = (collection) => {
+            baseStopCollectionRef.current = collection
+            setStopDisplayCollection(collection)
+
+            const baseCount = Array.isArray(collection?.features) ? collection.features.length : 0
+            const baseFrequency = calculateEstimatedFrequencyMinutes(
+                selectedRouteLengthRef.current,
+                baseCount
+            )
+
+            updateStopScenario({
+                baseCount,
+                adjustedCount: baseCount,
+                factor: baseCount > 0 ? 1 : 1,
+                baseFrequencyMinutes: baseFrequency,
+                adjustedFrequencyMinutes: baseFrequency
+            })
+        }
+
         const cached = stopCacheRef.current.get(selectedRouteId)
 
         if (cached) {
-            updateSourceData(cached)
-            setVisibleStopCount(cached.features?.length ?? 0)
+            applyCollection(cached)
             setIsFetchingStops(false)
             return
         }
 
         const requestedRouteId = selectedRouteId
         setIsFetchingStops(true)
-        resetStops()
+        resetScenario()
 
         fetchMbtaStopsForRoute(requestedRouteId)
             .then((collection) => {
@@ -1030,8 +1697,7 @@ export default function App() {
                     return
                 }
 
-                updateSourceData(collection)
-                setVisibleStopCount(collection.features?.length ?? 0)
+                applyCollection(collection)
             })
             .catch((error) => {
                 if (cancelled) return
@@ -1045,7 +1711,7 @@ export default function App() {
                     `Failed to load bus stops for route ${requestedRouteId} from the MBTA API.`
                 )
                 setStopDataError(message)
-                resetStops()
+                resetScenario()
             })
             .finally(() => {
                 if (cancelled) return
@@ -1059,7 +1725,7 @@ export default function App() {
             cancelled = true
         }
 
-    }, [selectedRouteId, mapIsReady])
+    }, [selectedRouteId, mapIsReady, updateStopScenario])
 
     useEffect(() => {
         if (!mapRef.current || !mapReadyRef.current) return
@@ -1078,6 +1744,22 @@ export default function App() {
             )
         }
     }, [selectedRouteId])
+
+    useEffect(() => {
+        if (!mapRef.current || !mapReadyRef.current) return
+
+        const sourceId = STOP_LAYER?.sourceId
+        if (!sourceId) return
+
+        const source = mapRef.current.getSource(sourceId)
+        if (!source) return
+
+        source.setData(stopDisplayCollection ?? EMPTY_GEOJSON)
+    }, [stopDisplayCollection])
+
+    useEffect(() => {
+        updatePopupContent()
+    }, [stopScenarioState, updatePopupContent])
 
     return (
         <div className="map-wrap">
