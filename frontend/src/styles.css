@@ -195,9 +195,17 @@ html, body, #root {
 
 .maplibregl-popup-content .popup-header {
     display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+
+.maplibregl-popup-content .popup-header-main {
+    display: flex;
     align-items: center;
     gap: 10px;
-    margin-bottom: 4px;
+    flex: 1;
+    min-width: 0;
 }
 
 .maplibregl-popup-content .popup-color-indicator {
@@ -213,6 +221,7 @@ html, body, #root {
     display: flex;
     flex-direction: column;
     gap: 1px;
+    min-width: 0;
 }
 
 .maplibregl-popup-content .popup-route-code {
@@ -228,6 +237,36 @@ html, body, #root {
     font-size: 0.94rem;
     font-weight: 700;
     color: #0f172a;
+    word-break: break-word;
+}
+
+.maplibregl-popup-content .popup-close-button {
+    margin-left: auto;
+    border: none;
+    background: transparent;
+    color: #475569;
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    padding: 2px;
+    transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+.maplibregl-popup-content .popup-close-button span {
+    display: block;
+    font-size: 1rem;
+    line-height: 1;
+}
+
+.maplibregl-popup-content .popup-close-button:hover,
+.maplibregl-popup-content .popup-close-button:focus-visible {
+    background: rgba(148, 163, 184, 0.22);
+    color: #0f172a;
+    outline: 2px solid rgba(37, 99, 235, 0.45);
 }
 
 .maplibregl-popup-content strong {

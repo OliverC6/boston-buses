@@ -1075,6 +1075,23 @@ export default function App() {
         setStopScenarioState(merged)
     }, [])
 
+    const clearRouteSelection = useCallback(() => {
+        selectedRouteIdRef.current = null
+        selectedRouteFeatureRef.current = null
+        selectedRouteLengthRef.current = 0
+        baseStopCollectionRef.current = EMPTY_GEOJSON
+        popupRef.current?.remove()
+        setSelectedRouteId(null)
+        setStopDisplayCollection(EMPTY_GEOJSON)
+        setIsFetchingStops(false)
+        setStopDataError(null)
+        updateStopScenario(DEFAULT_STOP_SCENARIO)
+    }, [updateStopScenario])
+
+    const handlePopupClose = useCallback(() => {
+        clearRouteSelection()
+    }, [clearRouteSelection])
+
     const adjustStopsByPercentage = useCallback(
         (change) => {
             const routeFeature = selectedRouteFeatureRef.current
@@ -1271,11 +1288,21 @@ export default function App() {
 
         const headerHtml = `
             <div class="popup-header">
-                <span class="popup-color-indicator" aria-hidden="true"></span>
-                <div class="popup-title">
-                    ${routeCode ? `<span class="popup-route-code">${escapeHtml(routeCode)}</span>` : ''}
-                    <strong class="popup-route-name">${escapeHtml(normalizedRouteTitle)}</strong>
+                <div class="popup-header-main">
+                    <span class="popup-color-indicator" aria-hidden="true"></span>
+                    <div class="popup-title">
+                        ${routeCode ? `<span class="popup-route-code">${escapeHtml(routeCode)}</span>` : ''}
+                        <strong class="popup-route-name">${escapeHtml(normalizedRouteTitle)}</strong>
+                    </div>
                 </div>
+                <button
+                    type="button"
+                    class="popup-close-button"
+                    data-action="close-popup"
+                    aria-label="Close popup"
+                >
+                    <span aria-hidden="true">&times;</span>
+                </button>
             </div>
         `
 
@@ -1343,7 +1370,16 @@ export default function App() {
         popupRef.current.setHTML(html)
 
         const popupElement = popupRef.current.getElement()
-        if (!popupElement || disableButtons) {
+        if (!popupElement) {
+            return
+        }
+
+        const closeButton = popupElement.querySelector('[data-action="close-popup"]')
+        if (closeButton) {
+            closeButton.addEventListener('click', handlePopupClose, { once: false })
+        }
+
+        if (disableButtons) {
             return
         }
 
@@ -1359,6 +1395,7 @@ export default function App() {
         }
     }, [handleDecreaseStops,
         handleIncreaseStops,
+        handlePopupClose,
         isFetchingStops,
         selectedLegendItem,
         selectedRouteLabel,
@@ -1386,7 +1423,8 @@ export default function App() {
 
             popupRef.current = new maplibregl.Popup({
                 closeButton: false,
-                closeOnMove: true,
+                closeOnClick: false,
+                closeOnMove: false,
                 offset: 12
             })
 
