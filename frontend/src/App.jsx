@@ -45,9 +45,12 @@ const STOP_LAYER = {
 
 // Frequency Estimation Constants
 const SECONDS_PER_MINUTE = 60
+const MINUTES_PER_HOUR = 60
 const METERS_PER_MILE = 1609.34
 const AVERAGE_BUS_SPEED_MPH = 12
 const DWELL_TIME_PER_STOP_SECONDS = 30
+const EFFECTIVE_STOP_DIRECTION_FACTOR = 0.5
+const AVERAGE_ROUTE_SPAN_PER_BUS_MILES = 1.8
 const MAX_ADJUSTED_STOPS = 400
 
 // Colors
@@ -314,7 +317,7 @@ function calculateLineDistanceInMeters(coordinates) {
     return total
 }
 
-function calculateGeometryLengthInMeters(geometry) {
+function calculateRepresentativeRouteLengthInMeters(geometry) {
     if (!geometry || typeof geometry !== 'object') {
         return 0
     }
@@ -324,9 +327,23 @@ function calculateGeometryLengthInMeters(geometry) {
     }
 
     if (geometry.type === 'MultiLineString') {
-        return Array.isArray(geometry.coordinates)
-            ? geometry.coordinates.reduce((sum, line) => sum + calculateLineDistanceInMeters(line), 0)
-            : 0
+        if (!Array.isArray(geometry.coordinates) || !geometry.coordinates.length) {
+            return 0
+        }
+
+        const segmentLengths = geometry.coordinates
+            .map((segment) => calculateLineDistanceInMeters(segment))
+            .filter((value) => Number.isFinite(value) && value > 0)
+
+        if (!segmentLengths.length) {
+            return 0
+        }
+
+        segmentLengths.sort((a, b) => b - a)
+        const sampleCount = Math.min(2, segmentLengths.length)
+        const total = segmentLengths.slice(0, sampleCount).reduce((sum, value) => sum + value, 0)
+
+        return total / sampleCount
     }
 
     return 0
@@ -334,18 +351,31 @@ function calculateGeometryLengthInMeters(geometry) {
 
 function calculateEstimatedFrequencyMinutes(routeLengthMeters, stopCount) {
     const length = Number(routeLengthMeters)
-    const stops = Math.max(0, Number.isFinite(stopCount) ? stopCount : 0)
+    const stopsRaw = Number.isFinite(stopCount) ? stopCount : 0
+    const effectiveStops = Math.max(0, stopsRaw * EFFECTIVE_STOP_DIRECTION_FACTOR)
 
-    const speedMetersPerMinute = (AVERAGE_BUS_SPEED_MPH * METERS_PER_MILE) / SECONDS_PER_MINUTE
+    const speedMetersPerMinute = (AVERAGE_BUS_SPEED_MPH * METERS_PER_MILE) / MINUTES_PER_HOUR
     const travelMinutes = Number.isFinite(length) && length > 0 ? length / speedMetersPerMinute : 0
-    const dwellMinutes = stops * (DWELL_TIME_PER_STOP_SECONDS / SECONDS_PER_MINUTE)
-    const total = travelMinutes + dwellMinutes
+    const dwellMinutes = effectiveStops * (DWELL_TIME_PER_STOP_SECONDS / SECONDS_PER_MINUTE)
+    const cycleMinutes = travelMinutes + dwellMinutes
 
-    if (!Number.isFinite(total) || total <= 0) {
+    if (!Number.isFinite(cycleMinutes) || cycleMinutes <= 0) {
         return dwellMinutes > 0 ? dwellMinutes : null
     }
 
-    return total
+    const routeLengthMiles = length / METERS_PER_MILE
+    const estimatedBusesInService = Math.max(
+        1,
+        Math.round(routeLengthMiles / AVERAGE_ROUTE_SPAN_PER_BUS_MILES) || 1
+    )
+
+    const frequencyMinutes = cycleMinutes / estimatedBusesInService
+
+    if (!Number.isFinite(frequencyMinutes) || frequencyMinutes <= 0) {
+        return dwellMinutes > 0 ? dwellMinutes : null
+    }
+
+    return frequencyMinutes
 }
 
 function interpolateCoordinate(start, end, t) {
@@ -1104,7 +1134,7 @@ export default function App() {
             }
 
             const routeLength =
-                selectedRouteLengthRef.current || calculateGeometryLengthInMeters(geometry)
+                selectedRouteLengthRef.current || calculateRepresentativeRouteLengthInMeters(geometry)
 
             if (Number.isFinite(routeLength)) {
                 selectedRouteLengthRef.current = routeLength
@@ -1214,6 +1244,40 @@ export default function App() {
         const routeName = feature.properties?.name ?? ''
         const headerLabel =
             selectedRouteLabel || [routeId, routeName].filter(Boolean).join(' ').trim() || 'MBTA Bus Route'
+        
+        const legendCode = typeof selectedLegendItem?.code === 'string' ? selectedLegendItem.code.trim() : ''
+        const legendName = typeof selectedLegendItem?.name === 'string' ? selectedLegendItem.name.trim() : ''
+        const routeColorCandidate =
+            typeof selectedLegendItem?.color === 'string'
+                ? selectedLegendItem.color.trim()
+                : typeof feature.properties?.color === 'string'
+                  ? feature.properties.color.trim()
+                  : ''
+
+        const routeTitle = legendName || routeName || headerLabel || 'MBTA Bus Route'
+        const normalizedRouteTitle = routeTitle.trim() || 'MBTA Bus Route'
+
+        let routeCode = legendCode || routeId
+        if (typeof routeCode === 'string') {
+            const trimmedCode = routeCode.trim()
+            routeCode =
+                trimmedCode &&
+                trimmedCode.toLowerCase() !== normalizedRouteTitle.toLowerCase()
+                    ? trimmedCode
+                    : ''
+        } else {
+            routeCode = ''
+        }
+
+        const headerHtml = `
+            <div class="popup-header">
+                <span class="popup-color-indicator" aria-hidden="true"></span>
+                <div class="popup-title">
+                    ${routeCode ? `<span class="popup-route-code">${escapeHtml(routeCode)}</span>` : ''}
+                    <strong class="popup-route-name">${escapeHtml(normalizedRouteTitle)}</strong>
+                </div>
+            </div>
+        `
 
         const scenario = stopScenarioRef.current
         const frequencyText = formatFrequencyMinutes(scenario.adjustedFrequencyMinutes)
@@ -1258,9 +1322,10 @@ export default function App() {
             ? `<p class="popup-error">${escapeHtml(stopDataError)}</p>`
             : ''
 
+        const containerColor = routeColorCandidate || '#0f3d91'
         const html = `
-            <div class="popup-content">
-                <strong>${escapeHtml(headerLabel)}</strong>
+            <div class="popup-content" style="--popup-route-color: ${escapeHtml(containerColor)};">
+                ${headerHtml}
                 <p class="popup-frequency">
                     Estimated frequency
                     <span class="popup-frequency-value">${escapeHtml(frequencyText)}</span>
@@ -1293,7 +1358,13 @@ export default function App() {
         if (decreaseButton) {
             decreaseButton.addEventListener('click', handleDecreaseStops, { once: false })
         }
-    }, [handleDecreaseStops, handleIncreaseStops, isFetchingStops, selectedRouteLabel, stopDataError])
+    }, [handleDecreaseStops,
+        handleIncreaseStops,
+        isFetchingStops,
+        selectedLegendItem,
+        selectedRouteLabel,
+        stopDataError
+    ])
 
     // Effects
     useEffect(() => {
@@ -1447,7 +1518,7 @@ export default function App() {
                 selectedRouteIdRef.current = featureId
                 selectedRouteFeatureRef.current = feature
 
-                const geometryLength = calculateGeometryLengthInMeters(feature.geometry)
+                                const geometryLength = calculateRepresentativeRouteLengthInMeters(feature.geometry)
                 if (Number.isFinite(geometryLength)) {
                     selectedRouteLengthRef.current = geometryLength
                 } else {
@@ -1652,7 +1723,7 @@ export default function App() {
 
         const computedRouteLength =
             selectedRouteLengthRef.current ||
-            calculateGeometryLengthInMeters(selectedRouteFeatureRef.current?.geometry)
+            calculateRepresentativeRouteLengthInMeters(selectedRouteFeatureRef.current?.geometry)
 
         if (Number.isFinite(computedRouteLength)) {
             selectedRouteLengthRef.current = computedRouteLength
