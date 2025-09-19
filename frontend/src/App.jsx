@@ -43,7 +43,7 @@ const STOP_LAYER = {
     }
 }
 
-// Frequency Estimation Constants
+// Constants
 const SECONDS_PER_MINUTE = 60
 const MINUTES_PER_HOUR = 60
 const METERS_PER_MILE = 1609.34
@@ -1337,7 +1337,6 @@ export default function App() {
                 </div>
                 ${errorHtml}
                 ${loadingHtml || noStopsHtml}
-                <p class="popup-hint">Shift + click anywhere on the map to append a stop for this route.</p>
             </div>
         `
 
@@ -1839,8 +1838,7 @@ export default function App() {
                 <div className="header">
                     <strong>MBTA Bus Frequency Mapper</strong>
                     <p>
-                        Explore existing routes, then select one and <kbd>Shift</kbd> + click anywhere on the route to
-                        sketch new stops for rapid frequency testing.
+                        Select a route to change its bus stops on the map.
                     </p>
                 </div>
                 <div className="legend">
@@ -1893,7 +1891,7 @@ export default function App() {
                             </p>
                         )
                     ) : (
-                        <p className="legend-note">Select a route to display its bus stops on the map.</p>
+                        <p className="legend-note"></p>
                     )}
                 </div>
             </div>
