@@ -27,15 +27,15 @@ const STOP_LAYER = {
             ['linear'],
             ['zoom'],
             13.5,
-            3.2,
+            6,
             15.4,
-            3.9,
+            7.5,
             17.2,
-            4.6
+            9
         ],
         color: '#1f7bf6',
-        opacity: 0.7,
-        strokeWidth: 0.6,
+        opacity: 0.85,
+        strokeWidth: 1.2,
         strokeColor: '#ffffff'
     }
 }
@@ -532,16 +532,22 @@ async function fetchMbtaRoutes() {
     return { type: 'FeatureCollection', features }
 }
 
-async function fetchMbtaStops() {
+async function fetchMbtaStopsForRoute(routeId) {
+    const normalizedRouteId = extractRouteId(routeId)
+
+    if (!normalizedRouteId) {
+        throw new Error('A valid route ID is required to load bus stops.')
+    }
+
     const stops = []
     const url = new URL('https://api-v3.mbta.com/stops')
-    const pageLimit = 1000
+    const pageLimit = 200
     let pageOffset = 0
 
     while (true) {
         url.searchParams.set('page[limit]', String(pageLimit))
         url.searchParams.set('page[offset]', String(pageOffset))
-        url.searchParams.set('filter[route_type]', '3')
+        url.searchParams.set('filter[route]', normalizedRouteId)
         url.searchParams.set('sort', 'name')
 
         const response = await fetch(url.toString(), {
@@ -579,23 +585,7 @@ async function fetchMbtaStops() {
         }
     }
 
-    if (!stops.length) {
-        throw new Error('no bus stops returned from the MBTA API')
-    }
-
-    const featureCollection = { type: 'FeatureCollection', features: stops }
-
-    if (!STOP_LAYER || typeof STOP_LAYER !== 'object') {
-        throw new Error('Invalid stop layer configuration')
-    }
-
-    const { sourceId } = STOP_LAYER
-
-    if (!sourceId) {
-        throw new Error('Stop layer is missing a source ID')
-    }
-
-    return { [sourceId]: featureCollection }
+    return { type: 'FeatureCollection', features: stops }
 }
 
 // Component
@@ -607,15 +597,17 @@ export default function App() {
     const hoveredRouteRef = useRef(null)
     const mapReadyRef = useRef(false)
     const selectedRouteIdRef = useRef(null)
+    const stopCacheRef = useRef(new Map())
 
     // States
     const [routesData, setRoutesData] = useState(EMPTY_GEOJSON)
-    const [stopData, setStopData] = useState({})
     const [selectedRouteId, setSelectedRouteId] = useState(null)
     const [mapIsReady, setMapIsReady] = useState(false)
     const [isFetchingData, setIsFetchingData] = useState(false)
+    const [isFetchingStops, setIsFetchingStops] = useState(false)
     const [dataError, setDataError] = useState(null)
     const [stopDataError, setStopDataError] = useState(null)
+    const [visibleStopCount, setVisibleStopCount] = useState(0)
 
     // Memos
     const legendItems = useMemo(
@@ -637,14 +629,33 @@ export default function App() {
         [routesData, selectedRouteId]
     )
 
-    const stopCount = useMemo(() => {
-        if (!stopData) return 0
-        const sourceId = STOP_LAYER?.sourceId
-        if (!sourceId) return 0
-        const collection = stopData[sourceId]
-        if (!collection || !Array.isArray(collection.features)) return 0
-        return collection.features.length
-    }, [stopData])
+    const selectedLegendItem = useMemo(
+        () => legendItems.find((item) => item.id === selectedRouteId) ?? null,
+        [legendItems, selectedRouteId]
+    )
+
+    const selectedRouteLabel = useMemo(() => {
+        if (!selectedRouteId) return ''
+
+        if (selectedLegendItem) {
+            const trimmedName = selectedLegendItem.name?.trim()
+            if (selectedLegendItem.code && trimmedName) {
+                return `${selectedLegendItem.code} ${trimmedName}`
+            }
+
+            if (selectedLegendItem.code) {
+                return selectedLegendItem.code
+            }
+
+            if (trimmedName) {
+                return trimmedName
+            }
+        }
+
+        return selectedRouteId
+    }, [selectedLegendItem, selectedRouteId])
+
+    const stopCount = visibleStopCount
 
     // Effects
     useEffect(() => {
@@ -896,13 +907,16 @@ export default function App() {
             setStopDataError(null)
 
             try {
+                /*
                 const [routesResult, stopsResult] = await Promise.allSettled([
                     fetchMbtaRoutes(),
                     fetchMbtaStops()
                 ])
-
+                */
+                const routesResult = await fetchMbtaRoutes()
                 if (cancelled) return
 
+                /*
                 if (routesResult.status === 'fulfilled') {
                     setRoutesData(routesResult.value)
                 } else {
@@ -924,6 +938,16 @@ export default function App() {
                     setStopData({})
                     setStopDataError(message)
                 }
+                */
+               setRoutesData(routesResult)
+            } catch (error) {
+                if (cancelled) return
+                const message = getErrorMessage(
+                    error,
+                    'Failed to load routes from the MBTA API.'
+                )
+                setRoutesData(EMPTY_GEOJSON)
+                setDataError(message)
             } finally {
                 if (!cancelled) {
                     setIsFetchingData(false)
@@ -948,22 +972,92 @@ export default function App() {
     }, [routesData])
 
     useEffect(() => {
-        if (!mapRef.current || !mapReadyRef.current || !stopData) return
+        selectedRouteIdRef.current = selectedRouteId
+    }, [selectedRouteId])
+
+    useEffect(() => {
+        if (!mapRef.current || !mapReadyRef.current) return
 
         const sourceId = STOP_LAYER?.sourceId
         if (!sourceId) return
 
-        const source = mapRef.current?.getSource(sourceId)
-        const data = stopData[sourceId]
+        const source = mapRef.current.getSource(sourceId)
+        if (!source) return
 
-        if (source && data) {
+        let cancelled = false
+
+        const updateSourceData = (data) => {
             source.setData(data)
         }
-    }, [stopData])
 
-    useEffect(() => {
-        selectedRouteIdRef.current = selectedRouteId
-    }, [selectedRouteId])
+        const resetStops = () => {
+            updateSourceData(EMPTY_GEOJSON)
+            if (!cancelled) {
+                setVisibleStopCount(0)
+            }
+        }
+
+        if (!selectedRouteId) {
+            setIsFetchingStops(false)
+            setStopDataError(null)
+            resetStops()
+            return
+        }
+
+        setStopDataError(null)
+
+        const cached = stopCacheRef.current.get(selectedRouteId)
+
+        if (cached) {
+            updateSourceData(cached)
+            setVisibleStopCount(cached.features?.length ?? 0)
+            setIsFetchingStops(false)
+            return
+        }
+
+        const requestedRouteId = selectedRouteId
+        setIsFetchingStops(true)
+        resetStops()
+
+        fetchMbtaStopsForRoute(requestedRouteId)
+            .then((collection) => {
+                if (cancelled) return
+                stopCacheRef.current.set(requestedRouteId, collection)
+
+                if (selectedRouteIdRef.current !== requestedRouteId) {
+                    return
+                }
+
+                updateSourceData(collection)
+                setVisibleStopCount(collection.features?.length ?? 0)
+            })
+            .catch((error) => {
+                if (cancelled) return
+
+                if (selectedRouteIdRef.current !== requestedRouteId) {
+                    return
+                }
+
+                const message = getErrorMessage(
+                    error,
+                    `Failed to load bus stops for route ${requestedRouteId} from the MBTA API.`
+                )
+                setStopDataError(message)
+                resetStops()
+            })
+            .finally(() => {
+                if (cancelled) return
+
+                if (selectedRouteIdRef.current === requestedRouteId) {
+                    setIsFetchingStops(false)
+                }
+            })
+
+        return () => {
+            cancelled = true
+        }
+
+    }, [selectedRouteId, mapIsReady])
 
     useEffect(() => {
         if (!mapRef.current || !mapReadyRef.current) return
@@ -1027,14 +1121,23 @@ export default function App() {
                     </div>
                     {stopDataError ? (
                         <p className="legend-warning">{stopDataError}</p>
-                    ) : isFetchingData && stopCount === 0 ? (
-                        <p className="legend-note">Loading bus stops from the MBTA API…</p>
-                    ) : stopCount > 0 ? (
-                        <p className="legend-note">
-                            Loaded {stopCount.toLocaleString()} MBTA bus stops from the live API.
-                        </p>
+                    ) : selectedRouteId ? (
+                        isFetchingStops ? (
+                            <p className="legend-note">
+                                Loading bus stops for route {selectedRouteLabel || selectedRouteId}…
+                            </p>
+                        ) : stopCount > 0 ? (
+                            <p className="legend-note">
+                                Showing {stopCount.toLocaleString()} bus stops for route{' '}
+                                {selectedRouteLabel || selectedRouteId}.
+                            </p>
+                        ) : (
+                            <p className="legend-note">
+                                No bus stops were returned for route {selectedRouteLabel || selectedRouteId}.
+                            </p>
+                        )
                     ) : (
-                        <p className="legend-note">MBTA bus stop locations load directly from the live API.</p>
+                        <p className="legend-note">Select a route to display its bus stops on the map.</p>
                     )}
                 </div>
             </div>
