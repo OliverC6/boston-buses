@@ -1149,6 +1149,55 @@ export default function App() {
         [adjustStopsByPercentage]
     )
 
+    // Memos
+    const legendItems = useMemo(
+        () =>
+            routesData.features
+                .slice()
+                .sort((a, b) => {
+                    const aCode = a.properties?.route_id || ''
+                    const bCode = b.properties?.route_id || ''
+                    return aCode.localeCompare(bCode, undefined, { numeric: true, sensitivity: 'base' })
+                })
+                .map((feature) => ({
+                id: feature.id,
+                code: feature.properties.route_id,
+                name: feature.properties.name,
+                color: feature.properties.color,
+                isSelected: feature.id === selectedRouteId,
+            })),
+        [routesData, selectedRouteId]
+    )
+
+    const selectedLegendItem = useMemo(
+        () => legendItems.find((item) => item.id === selectedRouteId) ?? null,
+        [legendItems, selectedRouteId]
+    )
+
+    const selectedRouteLabel = useMemo(() => {
+        if (!selectedRouteId) return ''
+
+        if (selectedLegendItem) {
+            const trimmedName = selectedLegendItem.name?.trim()
+            if (selectedLegendItem.code && trimmedName) {
+                return `${selectedLegendItem.code} ${trimmedName}`
+            }
+
+            if (selectedLegendItem.code) {
+                return selectedLegendItem.code
+            }
+
+            if (trimmedName) {
+                return trimmedName
+            }
+        }
+
+        return selectedRouteId
+    }, [selectedLegendItem, selectedRouteId])
+
+    const stopCount = stopScenarioState.adjustedCount ?? 0
+
+    // Popup
     const updatePopupContent = useCallback(() => {
         if (!popupRef.current) return
 
@@ -1245,54 +1294,6 @@ export default function App() {
             decreaseButton.addEventListener('click', handleDecreaseStops, { once: false })
         }
     }, [handleDecreaseStops, handleIncreaseStops, isFetchingStops, selectedRouteLabel, stopDataError])
-
-    // Memos
-    const legendItems = useMemo(
-        () =>
-            routesData.features
-                .slice()
-                .sort((a, b) => {
-                    const aCode = a.properties?.route_id || ''
-                    const bCode = b.properties?.route_id || ''
-                    return aCode.localeCompare(bCode, undefined, { numeric: true, sensitivity: 'base' })
-                })
-                .map((feature) => ({
-                id: feature.id,
-                code: feature.properties.route_id,
-                name: feature.properties.name,
-                color: feature.properties.color,
-                isSelected: feature.id === selectedRouteId,
-            })),
-        [routesData, selectedRouteId]
-    )
-
-    const selectedLegendItem = useMemo(
-        () => legendItems.find((item) => item.id === selectedRouteId) ?? null,
-        [legendItems, selectedRouteId]
-    )
-
-    const selectedRouteLabel = useMemo(() => {
-        if (!selectedRouteId) return ''
-
-        if (selectedLegendItem) {
-            const trimmedName = selectedLegendItem.name?.trim()
-            if (selectedLegendItem.code && trimmedName) {
-                return `${selectedLegendItem.code} ${trimmedName}`
-            }
-
-            if (selectedLegendItem.code) {
-                return selectedLegendItem.code
-            }
-
-            if (trimmedName) {
-                return trimmedName
-            }
-        }
-
-        return selectedRouteId
-    }, [selectedLegendItem, selectedRouteId])
-
-    const stopCount = stopScenarioState.adjustedCount ?? 0
 
     // Effects
     useEffect(() => {
